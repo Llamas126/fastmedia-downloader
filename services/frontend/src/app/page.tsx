@@ -23,18 +23,27 @@
 //                   /      /
 //                  /__/   /__/
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   AlertTriangle,
   CheckCircle2,
   Download,
+  Heart,
   Loader2,
   RotateCcw,
-  Zap,
 } from "lucide-react";
+import confetti from "canvas-confetti";
 import FormatSelector from "@/components/FormatSelector";
 import MetadataCard from "@/components/MetadataCard";
+import PlatformSelector from "@/components/PlatformSelector";
 import UrlForm from "@/components/UrlForm";
+import { DonationModal } from "@/components/ui/DonationModal";
+import SponsorWidget from "@/components/ui/SponsorWidget";
+import AdInterstitial from "@/components/ui/AdInterstitial";
+import TrustBadges from "@/components/ui/TrustBadges";
+import FaqSection from "@/components/ui/FaqSection";
+import UseCasesSection from "@/components/ui/UseCasesSection";
+
 import {
   analyzeUrl,
   getJobStatus,
@@ -64,6 +73,11 @@ export default function Home() {
   const [selectedFormat, setSelectedFormat] = useState<VideoFormat | null>(null);
   const [jobId, setJobId] = useState<string | null>(null);
   const [job, setJob] = useState<JobStatus | null>(null);
+  const [selectedPlatform, setSelectedPlatform] = useState<string | null>(null);
+  const [showDonationModal, setShowDonationModal] = useState(false);
+  const [showAdInterstitial, setShowAdInterstitial] = useState(false);
+  const [showMobileCta, setShowMobileCta] = useState(false);
+  const urlFormRef = useRef<HTMLDivElement>(null);
 
   const resetToIdle = useCallback(() => {
     setPhase("idle");
@@ -72,6 +86,7 @@ export default function Home() {
     setSelectedFormat(null);
     setJob(null);
     setJobId(null);
+    setSelectedPlatform(null);
   }, []);
 
   const handleAnalyze = useCallback(async (url: string) => {
@@ -129,6 +144,7 @@ export default function Home() {
           clearInterval(timer);
           setPhase("done");
           triggerBrowserDownload(jobId);
+          confetti({ particleCount: 80, spread: 60, origin: { y: 0.7 }, colors: ["#8b5cf6", "#06b6d4", "#d946ef"] });
         } else if (status.status === "error") {
           clearInterval(timer);
           setErrorMessage(status.error || "Ocurrió un error durante el procesamiento");
@@ -145,78 +161,132 @@ export default function Home() {
     };
   }, [phase, jobId, triggerBrowserDownload]);
 
+  useEffect(() => {
+    const observer = new IntersectionObserver(
+      ([entry]) => setShowMobileCta(!entry.isIntersecting),
+      { threshold: 0, rootMargin: "-100px 0px 0px 0px" }
+    );
+    const el = urlFormRef.current;
+    if (el) observer.observe(el);
+    return () => { if (el) observer.unobserve(el); };
+  }, []);
+
   const isBusy = phase === "analyzing" || phase === "requesting" || phase === "downloading";
 
   return (
-    <main className="relative mx-auto flex min-h-screen w-full max-w-5xl flex-col items-center px-4 pb-16">
-      <section className="flex w-full flex-col items-center pt-16 text-center sm:pt-24">
-        <span className="mb-6 inline-flex items-center gap-2 rounded-full border border-violet-400/20 bg-violet-500/10 px-4 py-1.5 text-xs font-medium text-violet-300">
-          <Zap className="h-3.5 w-3.5" aria-hidden />
-          Hasta 4K · Audio MP3 · Sin registro
-        </span>
-        <h1 className="text-4xl font-bold tracking-tight text-white sm:text-6xl">
-          FastMedia{" "}
-          <span className="bg-gradient-to-r from-violet-400 to-cyan-300 bg-clip-text text-transparent">
-            Downloader
-          </span>
-        </h1>
-        <p className="mt-4 max-w-xl text-sm text-slate-400 sm:text-base">
-          Analiza cualquier enlace y descarga video o audio exactamente en la calidad que necesitas.
-        </p>
-        <div className="mt-10 w-full max-w-2xl">
-          <UrlForm onAnalyze={handleAnalyze} loading={phase === "analyzing"} disabled={isBusy} />
-        </div>
-      </section>
-
-      <section className="mt-12 flex w-full flex-col items-center gap-6">
-        {phase === "analyzing" && <AnalyzingSkeleton />}
-
-        {(phase === "ready" || phase === "requesting") && info && (
-          <>
-            <MetadataCard info={info} />
-            <FormatSelector
-              formats={info.formats}
-              selected={selectedFormat}
-              onSelect={setSelectedFormat}
+    <>
+      <main id="main-content" className="relative mx-auto flex min-h-screen w-full max-w-5xl flex-col items-center px-4 pb-16">
+        <section className="flex w-full flex-col items-center pt-16 text-center sm:pt-24">
+          <h1 className="text-4xl font-bold tracking-tight text-white sm:text-6xl">
+            FastMedia{" "}
+            <span className="bg-gradient-to-r from-violet-400 to-cyan-300 bg-clip-text text-transparent">
+              Downloader
+            </span>
+          </h1>
+          <p className="mt-4 max-w-xl text-sm text-slate-400 sm:text-base">
+            Analiza cualquier enlace y descarga video o audio exactamente en la calidad que necesitas.
+          </p>
+          <div className="mt-4">
+            <TrustBadges />
+          </div>
+          <div className="mt-6 w-full max-w-2xl">
+            <PlatformSelector
+              selectedId={selectedPlatform}
+              onSelect={setSelectedPlatform}
             />
-            {selectedFormat && (
-              <button
-                type="button"
-                onClick={handleDownload}
-                disabled={phase === "requesting"}
-                className={`${PRIMARY_BUTTON} bg-gradient-to-r from-violet-600 to-fuchsia-600 shadow-lg shadow-violet-600/30 hover:brightness-110`}
-              >
-                {phase === "requesting" ? (
-                  <Loader2 className="h-5 w-5 animate-spin" aria-hidden />
-                ) : (
-                  <Download className="h-5 w-5" aria-hidden />
-                )}
-                {phase === "requesting" ? "Preparando…" : `Descargar · ${selectedFormat.label}`}
-              </button>
-            )}
-          </>
-        )}
+          </div>
+          <div ref={urlFormRef} className="mt-10 w-full max-w-2xl">
+            <UrlForm onAnalyze={handleAnalyze} loading={phase === "analyzing"} disabled={isBusy} />
+          </div>
+        </section>
 
-        {phase === "downloading" && <DownloadProgress job={job} />}
+        <section className="mt-12 flex w-full flex-col items-center gap-6">
+          {phase === "analyzing" && <AnalyzingSkeleton />}
 
-        {phase === "done" && jobId && (
-          <SuccessCard
-            onRedownload={() => triggerBrowserDownload(jobId)}
-            onReset={resetToIdle}
-          />
-        )}
+          {(phase === "ready" || phase === "requesting") && info && (
+            <>
+              <MetadataCard info={info} />
+              <FormatSelector
+                formats={info.formats}
+                selected={selectedFormat}
+                onSelect={setSelectedFormat}
+              />
+              {selectedFormat && (
+                <button
+                  type="button"
+                  onClick={handleDownload}
+                  disabled={phase === "requesting"}
+                  className={`${PRIMARY_BUTTON} bg-gradient-to-r from-violet-600 to-fuchsia-600 shadow-lg shadow-violet-600/30 hover:brightness-110`}
+                >
+                  {phase === "requesting" ? (
+                    <Loader2 className="h-5 w-5 animate-spin" aria-hidden />
+                  ) : (
+                    <Download className="h-5 w-5" aria-hidden />
+                  )}
+                  {phase === "requesting" ? "Preparando…" : `Descargar · ${selectedFormat.label}`}
+                </button>
+              )}
+            </>
+          )}
 
-        {phase === "error" && (
-          <ErrorCard message={errorMessage} onRetry={resetToIdle} />
-        )}
-      </section>
+          {phase === "downloading" && <DownloadProgress job={job} />}
 
-      <footer className="mt-auto pt-16 text-center text-xs leading-relaxed text-slate-600">
-        Uso responsable: descarga únicamente contenido del que tengas derechos o autorización.
-        <br />
-        FastMedia Downloader — arquitectura de microservicios con Next.js, FastAPI, yt-dlp y FFmpeg.
-      </footer>
-    </main>
+          {phase === "done" && jobId && (
+            <>
+              <SuccessCard
+                onRedownload={() => {
+                  triggerBrowserDownload(jobId);
+                  setShowAdInterstitial(true);
+                }}
+                onReset={resetToIdle}
+              />
+              <AdInterstitial
+                open={showAdInterstitial}
+                onClose={() => setShowAdInterstitial(false)}
+                onPrimary={resetToIdle}
+              />
+            </>
+          )}
+
+          {phase === "error" && (
+            <ErrorCard message={errorMessage} onRetry={resetToIdle} />
+          )}
+        </section>
+
+        <div className="mt-16 flex w-full flex-col items-center gap-16">
+          <UseCasesSection />
+          <FaqSection />
+          <div id="support" className="w-full max-w-3xl scroll-mt-24">
+            <SponsorWidget />
+          </div>
+        </div>
+      </main>
+
+      {showMobileCta && phase === "idle" && (
+        <div className="fixed inset-x-0 bottom-0 z-40 border-t border-white/10 bg-[#0b0b14]/90 p-3 backdrop-blur md:hidden">
+          <button
+            type="button"
+            onClick={() => urlFormRef.current?.scrollIntoView({ behavior: "smooth" })}
+            className="w-full rounded-xl bg-gradient-to-r from-violet-600 to-fuchsia-600 px-4 py-3 text-sm font-semibold text-white shadow-lg shadow-violet-600/30 active:scale-[0.98]"
+          >
+            <Download className="mr-2 inline h-4 w-4" aria-hidden />
+            Pegar URL y descargar
+          </button>
+        </div>
+      )}
+
+      <button
+        onClick={() => setShowDonationModal(true)}
+        className="fixed bottom-6 right-6 z-50 flex h-14 w-14 items-center justify-center rounded-full bg-gradient-to-br from-violet-600 to-fuchsia-600 text-white shadow-xl shadow-violet-600/30 hover:from-violet-500 hover:to-fuchsia-500 hover:scale-105 transition-all duration-300"
+        aria-label="Apoyar el proyecto"
+      >
+        <Heart className="h-7 w-7 fill-current" aria-hidden />
+      </button>
+      <DonationModal
+        isOpen={showDonationModal}
+        onClose={() => setShowDonationModal(false)}
+      />
+    </>
   );
 }
 
@@ -278,7 +348,7 @@ function SuccessCard({ onRedownload, onReset }: { onRedownload: () => void } & R
   return (
     <div className="w-full max-w-2xl rounded-2xl border border-emerald-400/20 bg-emerald-500/10 p-8 text-center backdrop-blur">
       <CheckCircle2 className="mx-auto h-12 w-12 text-emerald-400" aria-hidden />
-      <h3 className="mt-4 text-lg font-semibold text-white">¡Descarga completada!</h3>
+      <h2 className="mt-4 text-lg font-semibold text-white">¡Descarga completada!</h2>
       <p className="mx-auto mt-2 max-w-md text-sm text-slate-400">
         Si tu navegador no inició la descarga automáticamente, puedes reintentarla aquí.
       </p>
@@ -304,7 +374,7 @@ function ErrorCard({ message, onRetry }: { message: string; onRetry: () => void 
   return (
     <div className="w-full max-w-2xl rounded-2xl border border-red-400/20 bg-red-500/10 p-8 text-center backdrop-blur">
       <AlertTriangle className="mx-auto h-12 w-12 text-red-400" aria-hidden />
-      <h3 className="mt-4 text-lg font-semibold text-white">Algo salió mal</h3>
+      <h2 className="mt-4 text-lg font-semibold text-white">Algo salió mal</h2>
       <p className="mx-auto mt-2 max-w-md break-words text-sm text-slate-300">{message}</p>
       <button
         type="button"
