@@ -1,0 +1,37 @@
+[Unit]
+Description=FastMedia Downloader - Media Processor (descargas yt-dlp + FFmpeg)
+Documentation=https://github.com/Llamas126/fastmedia-downloader
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=www-data
+Group=www-data
+WorkingDirectory=/var/www/fastmedia-downloader/media-processor
+EnvironmentFile=/etc/fastmedia/media.env
+Environment=TEMP_STORAGE_DIR=/var/www/fastmedia-downloader/temp_storage
+# Estado de los jobs y WAL en SQLite (job_store.py): los reinicios marcan los
+# jobs activos como interrupted_by_restart; por eso un solo worker basta pero
+# no es obligatorio (la persistencia vive en disco, no en memoria).
+ExecStart=/var/www/fastmedia-downloader/media-processor/venv/bin/uvicorn worker:app --host 127.0.0.1 --port 8001 --workers 1
+Restart=always
+RestartSec=5
+TimeoutStopSec=20
+
+# Hardening
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+LockPersonality=yes
+ReadWritePaths=/var/www/fastmedia-downloader/temp_storage
+
+[Install]
+WantedBy=multi-user.target
