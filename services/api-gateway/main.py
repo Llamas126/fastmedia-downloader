@@ -175,8 +175,23 @@ class DownloadRequest(BaseModel):
 
 
 @app.get("/health")
-def health() -> dict[str, str]:
-    return {"status": "ok", "service": "api-gateway"}
+async def health() -> dict[str, Any]:
+    """Health check no bloqueante: reporta tambien el estado del media-processor."""
+    status = "ok"
+    media = "unreachable"
+    try:
+        async with httpx.AsyncClient(timeout=2.0) as client:
+            response = await client.get(f"{MEDIA_PROCESSOR_URL}/health")
+        media = "ok" if response.status_code == 200 else f"http_{response.status_code}"
+    except httpx.HTTPError:
+        media = "unreachable"
+    if media != "ok":
+        status = "degraded"
+    return {
+        "status": status,
+        "service": "api-gateway",
+        "dependency": {"media_processor": media},
+    }
 
 
 @app.get("/api/v1/info")
