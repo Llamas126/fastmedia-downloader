@@ -1,0 +1,430 @@
+"""Capa de normalización y configuración robusta de yt-dlp para multi-plataforma."""
+
+import logging
+import os
+import traceback
+from dataclasses import dataclass
+from typing import Any, Optional
+from urllib.parse import urlparse
+
+import yt_dlp
+from fastapi import HTTPException
+from fastapi.concurrency import run_in_threadpool
+
+logger = logging.getLogger(__name__)
+
+# ============================================================
+# CONFIGURACIÓN BASE ROBUSTA PARA TODAS LAS PLATAFORMAS
+# ============================================================
+
+COOKIES_PATH = "/app/cookies.txt"
+ALLOW_INSECURE_TLS = os.getenv("YTDLP_ALLOW_INSECURE_TLS", "0").lower() in ("1", "true", "yes")
+
+# Clientes alternativos de YouTube para esquivar fallos transitorios de
+# extracción (nsig, player response, throttling). Se prueban en orden.
+YOUTUBE_CLIENT_FALLBACKS: list[dict[str, Any]] = [
+    {"youtube": {"player_client": ["android"]}},
+    {"youtube": {"player_client": ["tv"]}},
+    {"youtube": {"player_client": ["web"]}},
+    {"youtube": {"player_client": ["android_vr"]}},
+]
+
+
+def is_youtube_url(url: str) -> bool:
+    host = (urlparse(url).hostname or "").lower()
+    return host.endswith("youtube.com") or host.endswith("youtu.be")
+
+
+def _get_base_options(skip_download: bool = True) -> dict[str, Any]:
+    """Construye opciones base con cookies opcionales."""
+    options: dict[str, Any] = {
+        "quiet": True,
+        "no_warnings": True,
+        "noplaylist": True,
+        "extract_flat": "in_playlist",
+        "skip_download": skip_download,
+        "socket_timeout": 15,
+        "nocheckcertificate": ALLOW_INSECURE_TLS,
+        "geo_bypass": True,
+        "geo_bypass_country": "ES",
+        "http_headers": {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/127.0.0.0 Safari/537.36"
+            ),
+            "Accept-Language": "es-ES,es;q=0.9,en;q=0.8",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Sec-Fetch-Mode": "navigate",
+        },
+        "extractor_retries": 3,
+        "fragment_retries": 3,
+        "skip_unavailable_fragments": True,
+    }
+    if os.path.exists(COOKIES_PATH):
+        options["cookiefile"] = COOKIES_PATH
+        logger.info("Cookies cargadas desde %s", COOKIES_PATH)
+    return options
+
+
+BASE_EXTRACTOR_OPTIONS = _get_base_options(skip_download=True)
+
+DOWNLOAD_OPTIONS_BASE = _get_base_options(skip_download=False)
+DOWNLOAD_OPTIONS_BASE.update({
+    "noplaylist": True,
+    "socket_timeout": 30,
+    "retries": 3,
+    "fragment_retries": 10,
+    "max_filesize": 2048 * 1024 * 1024,
+    "windowsfilenames": True,
+})
+
+
+# ============================================================
+# MODELOS DE DATOS NORMALIZADOS
+# ============================================================
+
+@dataclass
+class NormalizedFormat:
+    format_id: str
+    label: str
+    height: Optional[int] = None
+    ext: Optional[str] = None
+    filesize_bytes: Optional[int] = None
+    filesize_human: Optional[str] = None
+    url: Optional[str] = None
+    audio_only: bool = False
+    vcodec: Optional[str] = None
+    acodec: Optional[str] = None
+
+
+@dataclass
+class NormalizedMediaInfo:
+    title: str
+    thumbnail: Optional[str]
+    duration: int
+    uploader: Optional[str]
+    webpage_url: str
+    formats: list[NormalizedFormat]
+    is_live: bool = False
+    extractor: Optional[str] = None
+
+
+# ============================================================
+# FUNCIONES DE EXTRACCIÓN ASÍNCRONA (NO BLOQUEANTE)
+# ============================================================
+
+async def extract_info_async(url: str, download: bool = False) -> dict[str, Any]:
+    """Ejecuta yt-dlp en thread pool para no bloquear el Event Loop de FastAPI.
+
+    Si la extracción de YouTube falla por un motivo transitorio (nsig,
+    player response, throttling) se reintenta con player clients
+    alternativos antes de propagar el error.
+    """
+    options = _get_base_options(skip_download=not download)
+
+    def _extract(extra_args: Optional[dict[str, Any]] = None) -> dict[str, Any]:
+        opts = dict(options)
+        if extra_args:
+            opts["extractor_args"] = extra_args
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            return ydl.extract_info(url, download=download)
+
+    try:
+        return await run_in_threadpool(_extract)
+    except (yt_dlp.utils.ExtractorError, yt_dlp.utils.DownloadError) as exc:
+        if not is_youtube_url(url):
+            raise
+        for extra_args in YOUTUBE_CLIENT_FALLBACKS:
+            logger.info("Fallback de cliente YouTube (%s) para %s", extra_args, url)
+            try:
+                return await run_in_threadpool(_extract, extra_args)
+            except (yt_dlp.utils.ExtractorError, yt_dlp.utils.DownloadError):
+                continue
+        raise exc
+
+
+# ============================================================
+# NORMALIZADOR PRINCIPAL - MANEJA TODAS LAS PLATAFORMAS
+# ============================================================
+
+def _to_int(value: Any, default: Optional[int] = None) -> Optional[int]:
+    """Convierte a int tolerando strings; None si no es convertible."""
+    try:
+        if value is None:
+            return default
+        return int(float(value))
+    except (TypeError, ValueError):
+        return default
+
+
+def _to_float(value: Any, default: Optional[float] = None) -> Optional[float]:
+    """Convierte a float tolerando strings; None si no es convertible."""
+    try:
+        if value is None:
+            return default
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def normalize_info(raw_info: dict[str, Any], original_url: str) -> NormalizedMediaInfo:
+    """Normaliza la respuesta cruda de yt-dlp a estructura consistente."""
+    info = _resolve_first_entry(raw_info)
+
+    if info is None:
+        raise ValueError("No se pudo extraer información válida")
+
+    title = _extract_title(info)
+    thumbnail = _extract_thumbnail(info)
+    duration = _to_int(info.get("duration")) or 0
+    uploader = info.get("uploader") or info.get("channel") or info.get("creator")
+    webpage_url = info.get("webpage_url") or info.get("url") or original_url
+    is_live = info.get("is_live", False)
+    extractor = info.get("extractor_key") or info.get("extractor")
+
+    formats = _normalize_formats(info, duration)
+
+    return NormalizedMediaInfo(
+        title=title,
+        thumbnail=thumbnail,
+        duration=duration,
+        uploader=uploader,
+        webpage_url=webpage_url,
+        formats=formats,
+        is_live=is_live,
+        extractor=extractor,
+    )
+
+
+def _resolve_first_entry(info: dict[str, Any]) -> Optional[dict[str, Any]]:
+    """Resuelve playlists/carruseles al primer elemento válido."""
+    if info.get("_type") == "playlist" and info.get("entries"):
+        for entry in info["entries"]:
+            if entry and entry.get("_type") != "playlist":
+                logger.info("Playlist detectada, usando primer entry: %s", entry.get("id"))
+                return entry
+        return None
+
+    if info.get("entries") and not info.get("_type"):
+        for entry in info["entries"]:
+            if entry and (entry.get("url") or entry.get("formats")):
+                return entry
+
+    return info
+
+
+def _extract_title(info: dict[str, Any]) -> str:
+    title = (
+        info.get("title")
+        or info.get("description", "")[:50]
+        or info.get("alt_title")
+        or info.get("track")
+        or "Video sin título"
+    )
+    return title.strip()[:200]
+
+
+def _extract_thumbnail(info: dict[str, Any]) -> Optional[str]:
+    if info.get("thumbnail"):
+        return info["thumbnail"]
+    thumbnails = info.get("thumbnails") or []
+    for t in reversed(thumbnails):
+        if t.get("url"):
+            return t["url"]
+    return None
+
+
+def _normalize_formats(info: dict[str, Any], duration: int) -> list[NormalizedFormat]:
+    """Normaliza formatos para TODAS las plataformas."""
+    formats: list[NormalizedFormat] = []
+    raw_formats = info.get("formats") or []
+
+    if raw_formats:
+        formats = _process_format_list(raw_formats, duration)
+
+    if not formats and info.get("url"):
+        formats.append(NormalizedFormat(
+            format_id="direct",
+            label="Calidad original",
+            ext=info.get("ext") or "mp4",
+            url=info["url"],
+            filesize_bytes=_estimate_size(info),
+            filesize_human=_human_size(_estimate_size(info)),
+            vcodec=info.get("vcodec"),
+            acodec=info.get("acodec"),
+        ))
+
+    if not formats and info.get("acodec") not in (None, "none"):
+        formats.append(NormalizedFormat(
+            format_id="audio_direct",
+            label="Audio original",
+            audio_only=True,
+            ext=info.get("ext") or "mp3",
+            url=info.get("url"),
+            acodec=info.get("acodec"),
+        ))
+
+    if duration > 0 and not any(f.audio_only for f in formats):
+        mp3_size = int(192 * 1000 / 8 * duration)
+        formats.append(NormalizedFormat(
+            format_id="bestaudio",
+            label="Solo Audio (MP3)",
+            audio_only=True,
+            ext="mp3",
+            filesize_bytes=mp3_size,
+            filesize_human=_human_size(mp3_size),
+        ))
+
+    return formats
+
+
+def _process_format_list(raw_formats: list[dict], duration: int) -> list[NormalizedFormat]:
+    best_by_height: dict[int, NormalizedFormat] = {}
+
+    for fmt in raw_formats:
+        if fmt.get("vcodec") in (None, "none"):
+            continue
+
+        height = _to_int(fmt.get("height"))
+        format_id = fmt.get("format_id")
+        if not height or not format_id:
+            continue
+
+        filesize = _to_int(fmt.get("filesize")) or _to_int(fmt.get("filesize_approx"))
+        if not filesize and duration > 0:
+            tbr = _to_float(fmt.get("tbr"))
+            if tbr:
+                filesize = int(tbr * 1000 / 8 * duration)
+
+        nf = NormalizedFormat(
+            format_id=str(format_id),
+            label=_height_to_label(height),
+            height=height,
+            ext=fmt.get("ext"),
+            filesize_bytes=filesize,
+            filesize_human=_human_size(filesize),
+            vcodec=fmt.get("vcodec"),
+            acodec=fmt.get("acodec"),
+        )
+
+        current = best_by_height.get(height)
+        if current is None or (_to_float(fmt.get("tbr")) or 0) > (current.filesize_bytes or 0):
+            best_by_height[height] = nf
+
+    return [best_by_height[h] for h in sorted(best_by_height.keys(), reverse=True)]
+
+
+def _height_to_label(height: int) -> str:
+    labels = {
+        4320: "8K", 2880: "5K", 2160: "4K", 1440: "1440p",
+        1080: "1080p", 720: "720p", 480: "480p", 360: "360p",
+        240: "240p", 144: "144p",
+    }
+    return labels.get(height, f"{height}p")
+
+
+def _estimate_size(info: dict[str, Any]) -> Optional[int]:
+    filesize = _to_int(info.get("filesize")) or _to_int(info.get("filesize_approx"))
+    if filesize:
+        return int(filesize)
+    duration = _to_float(info.get("duration")) or 0
+    tbr = _to_float(info.get("tbr"))
+    if tbr and duration:
+        return int(tbr * 1000 / 8 * duration)
+    return None
+
+
+def _human_size(size_bytes: Optional[int]) -> Optional[str]:
+    if not size_bytes or size_bytes <= 0:
+        return None
+    value = float(size_bytes)
+    for unit in ("B", "KB", "MB", "GB"):
+        if value < 1024 or unit == "GB":
+            decimals = 0 if unit == "B" else 1
+            return f"{value:.{decimals}f} {unit}".replace(".0 ", " ")
+        value /= 1024
+    return None
+
+
+# ============================================================
+# MANEJO DE ERRORES CENTRALIZADO
+# ============================================================
+
+class ExtractorError(Exception):
+    def __init__(self, message: str, status_code: int = 400, original: Optional[Exception] = None):
+        self.message = message
+        self.status_code = status_code
+        self.original = original
+        super().__init__(message)
+
+
+def _classify_ytdlp_error(exc: Exception, url: str) -> ExtractorError:
+    """Traduce un error de yt-dlp a un ExtractorError con estado HTTP coherente.
+
+    Solo se usa 422 cuando la plataforma realmente no es soportada; los
+    fallos habituales de YouTube (nsig, bot-check, región...) devuelven
+    códigos accionables (400/401/403/429).
+    """
+    if isinstance(exc, yt_dlp.utils.GeoRestrictedError):
+        return ExtractorError("El video no está disponible en tu región", 403, original=exc)
+
+    msg = str(exc).lower()
+
+    if "sign in" in msg or "bot" in msg or "confirm you" in msg or "verify you" in msg:
+        return ExtractorError("La plataforma pide verificación anti-bot; inténtalo más tarde", 400, original=exc)
+
+    if "private" in msg or "deleted" in msg or "removed" in msg or "unavailable" in msg:
+        return ExtractorError("El video es privado, fue eliminado o no está disponible", 400, original=exc)
+
+    if "geo" in msg or "country" in msg or "not available in your country":
+        return ExtractorError("El video no está disponible en tu región", 403, original=exc)
+
+    if "login" in msg or "auth" in msg or "cookies" in msg or "terminal" in msg:
+        return ExtractorError("El video requiere autenticación (cookies)", 401, original=exc)
+
+    if is_youtube_url(url):
+        transient = any(
+            token in msg
+            for token in (
+                "nsig", "player response", "throttl", "timed out", "http error",
+                "bad request", "unable to extract", "requested format", "initial player",
+            )
+        )
+        if transient:
+            return ExtractorError("Error temporal de YouTube; inténtalo de nuevo en unos segundos", 429, original=exc)
+        return ExtractorError("No se pudo extraer el video de YouTube", 400, original=exc)
+
+    return ExtractorError("Plataforma no soportada o estructura de datos cambiada", 422, original=exc)
+
+
+async def safe_extract_info(url: str) -> NormalizedMediaInfo:
+    """Wrapper seguro que captura errores específicos de yt-dlp."""
+    try:
+        raw_info = await extract_info_async(url, download=False)
+
+        if raw_info is None:
+            raise ExtractorError("No se encontró contenido en la URL", 404)
+
+        return normalize_info(raw_info, url)
+
+    except yt_dlp.utils.GeoRestrictedError as exc:
+        logger.error("GeoRestrictedError procesando %s: %s", url, traceback.format_exc())
+        raise ExtractorError("El video no está disponible en tu región", 403, original=exc)
+
+    except (yt_dlp.utils.DownloadError, yt_dlp.utils.ExtractorError) as exc:
+        logger.error("%s procesando %s: %s",
+                     type(exc).__name__, url, traceback.format_exc())
+        raise _classify_ytdlp_error(exc, url)
+
+    except yt_dlp.utils.UnsupportedError as exc:
+        logger.error("UnsupportedError procesando %s: %s", url, traceback.format_exc())
+        raise ExtractorError("Plataforma no soportada por yt-dlp", 422, original=exc)
+
+    except ValueError as exc:
+        logger.error("Error de validación para %s: %s", url, traceback.format_exc())
+        raise ExtractorError(str(exc), 400)
+
+    except Exception as exc:
+        logger.exception("Error inesperado procesando %s", url)
+        raise ExtractorError("Error interno del servidor", 500)
