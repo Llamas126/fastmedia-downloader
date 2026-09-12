@@ -146,12 +146,41 @@ uvicorn worker:app --port 8001
 
 ---
 
+## 🍪 Cookies y plataformas con anti-bot
+
+En VPS con **IPs de datacenter** (p. ej. Oracle Cloud) algunas plataformas bloquean la
+extracción o devuelven desafíos anti-bot (CAPTCHA/JS). El API Gateway y el Media
+Processor cargan cookies automáticamente si el archivo existe (mismo módulo compartido):
+
+- **Ruta**: `./secrets/cookies.txt` (formato Netscape, montado *read-only* como `/app/secrets/cookies.txt`).
+- **Cómo exportarlo**: con el navegador iniciado en el sitio que quieras desbloquear, usa
+  una extensión tipo *Get cookies.txt LOCALLY* (o `curl -c cookies.txt <url>`).
+- **Variable**: `FMD_COOKIES_FILE` permite cambiar la ruta por defecto.
+
+| Plataforma | ¿Cookies? | Notas |
+|---|---|---|
+| YouTube | Opcional | Útil en IPs de datacenter (firma NSIG) |
+| Pornhub (free) | No | Videos privados/premium requieren sesión |
+| Pornhub Premium / embeds | Sí | Requiere sesión activa de Pornhub Premium |
+| XVideos | A veces | Dan CAPTCHA tras varios intentos seguidos |
+| XNXX | No (free) | Dominios regionales (`.es`, `.tv`, …) ya rutados al extractor nativo |
+| Twitch | No | Clips/VOD públicos se extraen sin cookies |
+| 4chan | No | Plugin propio (threads y archivos de `i.4cdn.org`) |
+| TikTok / Instagram | No | Solo contenido público |
+
+> **Advertencia**: `secrets/cookies.txt` contiene sesiones personales del navegador;
+> **nunca lo commitees** (está en `.gitignore`). Revisa `secrets/cookies.txt.example`
+> para conocer el formato esperado.
+
+---
+
 ## 📁 Estructura del monorepo
 
 ```
 fastmedia-downloader/
 ├── docker-compose.yml              # Orquestación: red bridge, volúmenes, healthchecks, límites de recursos
 ├── .env.example                    # Variables de entorno documentadas (copiar a .env)
+├── secrets/                        # cookies.txt local del navegador (gitignored; ver cookies.txt.example)
 ├── LICENSE                         # MIT © 2026 Juan Camilo Llamas Cárdenas
 ├── services/
 │   ├── frontend/                   # Next.js 14+ (App Router, TS, Tailwind)
@@ -162,6 +191,9 @@ fastmedia-downloader/
 │   │       ├── app/                # layout, page (máquina de estados), globals.css
 │   │       ├── components/         # UrlForm, MetadataCard, FormatSelector
 │   │       └── lib/api.ts          # Cliente tipado del Gateway
+│   ├── shared/                     # Módulo yt-dlp compartido por ambos backends
+│   │   ├── extractor.py            # Config base, normalización y clasificador de errores
+│   │   └── yt_dlp_plugins/         # Plugins propios (4chan, XNXX regional)
 │   ├── api-gateway/                # FastAPI :8000
 │   │   ├── Dockerfile              # python:3.11-slim
 │   │   ├── requirements.txt
@@ -180,6 +212,7 @@ fastmedia-downloader/
 - **Jobs en memoria** (`dict` + lock) dentro del Media Processor: simple y sin dependencias externas para v1. Los jobs no sobreviven reinicios del contenedor (los directorios huérfanos de `temp_storage/` se purgan al arrancar). Ruta de escalado: sustituir por **Redis** + cola (RQ/Celery/arq) para múltiples réplicas horizontales del worker.
 - **Progreso por pistas**: en descargas DASH (video+audio separados) la barra puede reiniciarse entre pista de video y pista de audio; es el comportamiento esperado del hook de yt-dlp.
 - **Plataformas con anti-bot agresivo** (p. ej. YouTube en datacenters): pueden requerir cookies o tokens; se puede extender pasando `cookiefile` en las opciones de yt-dlp.
+- **Detección de streams**: si una página con extractor dedicado o Generic existe pero no expone video (bloqueo JS/cookies), `/api/v1/info` responde `422` con mensaje claro en lugar de `200` con formatos vacíos. Los plugins propios (4chan, XNXX regional) amplían las regex de yt-dlp para que dominios regionales no caigan en el Generic.
 - Limpieza automática de `temp_storage/` cada 60 s: archivos terminados con más de `FILE_TTL_MINUTES`, jobs atascados con más de `MAX_JOB_MINUTES`.
 - **yt-dlp siempre actualizado**: cada contenedor intenta `pip install --upgrade yt-dlp` al arrancar (best-effort: sin red, arranca con la versión incluida). Previene bloqueos por firmas desactualizadas de las plataformas.
 - **Tamaños estimados en la UI**: `/api/v1/info` calcula el peso final sumando video + audio del merge DASH; si la plataforma omite el tamaño, se aproxima con `tbr × duración`. La opción MP3 se estima a 192 kbps.

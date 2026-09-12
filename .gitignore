@@ -30,6 +30,11 @@ env/
 services/media-processor/temp_storage/*
 !services/media-processor/temp_storage/.gitkeep
 
+# ===== Secrets (cookies del navegador; NO commitear) =====
+secrets/cookies.txt
+secrets/*.txt
+!secrets/cookies.txt.example
+
 # ===== Logs =====
 logs/
 *.log
