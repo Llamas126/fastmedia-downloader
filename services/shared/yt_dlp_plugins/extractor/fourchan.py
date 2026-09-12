@@ -63,7 +63,7 @@ class FourChanIE(InfoExtractor):
             files.append(og.group(1))
 
         if not files:
-            self.raise_no_formats('No se encontró ningún archivo de video en el hilo', expected=True)
+            self.raise_no_formats('El hilo no contiene video descargable', expected=True)
 
         unique = list(dict.fromkeys(files))
         title_m = re.search(r'<title[^>]*>([^<]+)</title>', webpage)

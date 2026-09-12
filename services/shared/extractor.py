@@ -445,12 +445,37 @@ def _classify_ytdlp_error(exc: Exception, url: str) -> ExtractorError:
                 original=exc,
             )
 
+    if "unsupported url" in msg:
+        return ExtractorError(
+            "No se detectó un stream de video/audio descargable en la página; "
+            "la plataforma puede no estar soportada o estar bloqueada (cookies/captcha)",
+            422,
+            original=exc,
+        )
+
+    if "no video found" in msg:
+        return ExtractorError(
+            "No se detectó contenido de video/audio en la página; puede estar bloqueada (cookies/captcha) "
+            "o requerir iniciar sesión",
+            422,
+            original=exc,
+        )
+
+    if "no video formats" in msg or "no playable sources" in msg or "no contiene video" in msg:
+        if is_youtube_url(url):
+            return ExtractorError(
+                "Error temporal en la plataforma; inténtalo de nuevo en unos segundos", 429, original=exc)
+        return ExtractorError("El contenido no expone un stream de video descargable en esta página", 400, original=exc)
+
+    if "redirection" in msg:
+        return ExtractorError("El contenido fue eliminado o requiere iniciar sesión", 410, original=exc)
+
     transient = any(
         t in msg
         for t in (
             "nsig", "player response", "throttl", "timed out", "http error",
             "bad request", "unable to extract", "requested format", "initial player",
-            "no video formats", "connection", "timeout", "temporary",
+            "connection", "timeout", "temporary",
         )
     )
     if transient:
@@ -490,6 +515,12 @@ async def safe_extract_info(url: str) -> NormalizedMediaInfo:
                 "El contenido es una transmisión en vivo y no se puede descargar como archivo; usa un clip o VOD",
                 400,
             )
+        if not result.formats:
+            raise ExtractorError(
+                "No se detectó ningún stream de video/audio descargable en la página; "
+                "puede estar bloqueada (cookies/captcha) o requerir iniciar sesión",
+                422,
+            )
         return result
 
     except yt_dlp.utils.GeoRestrictedError as exc:
@@ -503,7 +534,12 @@ async def safe_extract_info(url: str) -> NormalizedMediaInfo:
 
     except yt_dlp.utils.UnsupportedError as exc:
         logger.error("UnsupportedError procesando %s: %s", url, traceback.format_exc())
-        raise ExtractorError("Plataforma no soportada por yt-dlp", 422, original=exc)
+        raise ExtractorError(
+            "La página no expuso un stream de video/audio detectable; "
+            "puede estar bloqueada (cookies/captcha) o requerir iniciar sesión",
+            422,
+            original=exc,
+        )
 
     except ValueError as exc:
         logger.error("Error de validación para %s: %s", url, traceback.format_exc())
