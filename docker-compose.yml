@@ -6,19 +6,23 @@ services:
       context: ./services/frontend
       args:
         NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
+        NEXT_PUBLIC_MEDIA_URL: ${NEXT_PUBLIC_MEDIA_URL:-http://localhost:8000}
     ports:
-      - "${FRONTEND_PORT:-3000}:3000"
+      - "${FRONTEND_PORT:-3000}:80"
     environment:
       NODE_ENV: production
     depends_on:
       api-gateway:
         condition: service_healthy
-    mem_limit: 256m
-    cpus: 0.5
+    mem_limit: 128m
+    cpus: 0.25
     security_opt:
       - no-new-privileges:true
     cap_drop:
       - ALL
+    cap_add:
+      - SETUID
+      - SETGID
     restart: unless-stopped
     networks:
       - fastmedia-net
@@ -30,6 +34,7 @@ services:
     environment:
       MEDIA_PROCESSOR_URL: http://media-processor:8001
       ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://localhost:3000}
+      ALLOWED_ORIGIN_REGEX: ${ALLOWED_ORIGIN_REGEX:-}
       RATE_LIMIT_PER_MINUTE: ${RATE_LIMIT_PER_MINUTE:-60}
       DOWNLOADS_PER_MINUTE: ${DOWNLOADS_PER_MINUTE:-10}
       MAX_BODY_BYTES: ${MAX_BODY_BYTES:-65536}
