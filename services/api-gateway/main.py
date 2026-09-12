@@ -33,18 +33,27 @@ import logging
 import os
 import re
 import socket
+import sys
 import threading
 import time
 from collections import defaultdict, deque
+from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import quote, urlparse
 
 import httpx
-import yt_dlp
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, field_validator
+
+try:
+    from extractor import safe_extract_info, NormalizedMediaInfo, ExtractorError
+except ModuleNotFoundError:
+    _SHARED_DIR = Path(__file__).resolve().parent.parent / "shared"
+    if str(_SHARED_DIR) not in sys.path:
+        sys.path.insert(0, str(_SHARED_DIR))
+    from extractor import safe_extract_info, NormalizedMediaInfo, ExtractorError
 
 logger = logging.getLogger(__name__)
 
@@ -64,37 +73,10 @@ ALLOW_INSECURE_TLS = os.getenv("YTDLP_ALLOW_INSECURE_TLS", "0").lower() in ("1",
 JOB_ID_PATTERN = re.compile(r"^[a-f0-9]{32}$")
 FORMAT_ID_PATTERN = re.compile(r"^[A-Za-z0-9_.\-]{1,32}$")
 
-RESOLUTION_LABELS = {
-    4320: "8K",
-    2880: "5K",
-    2160: "4K",
-    1440: "1440p",
-    1080: "1080p",
-    720: "720p",
-    480: "480p",
-    360: "360p",
-    240: "240p",
-    144: "144p",
-}
 
-AUDIO_FORMAT_ID = "bestaudio"
 
 HTTP_TIMEOUT = httpx.Timeout(30.0, connect=10.0)
 STREAM_TIMEOUT = httpx.Timeout(None, connect=15.0)
-
-USER_AGENT = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
-)
-
-BASE_YTDLP_OPTIONS = {
-    "quiet": True,
-    "no_warnings": True,
-    "noplaylist": True,
-    "nocheckcertificate": ALLOW_INSECURE_TLS,
-    "http_headers": {"User-Agent": USER_AGENT},
-    "extractor_retries": 3,
-}
 
 _RATE_LOCK = threading.Lock()
 _RATE_HITS: dict[tuple[str, str], deque[float]] = defaultdict(deque)
@@ -193,141 +175,49 @@ def health() -> dict[str, str]:
 
 
 @app.get("/api/v1/info")
-def get_video_info(url: str) -> dict[str, Any]:
+async def get_video_info(
+    url: str = Query(..., description="URL del video a analizar", min_length=1, max_length=4096)
+) -> dict[str, Any]:
     """Invoca yt-dlp en modo download=False para obtener metadatos y formatos."""
+    if len(url) < 8:
+        logger.warning("URL demasiado corta: %s", url)
+        raise HTTPException(status_code=400, detail="La URL es demasiado corta")
+    if len(url) > 4096:
+        raise HTTPException(status_code=400, detail="La URL es demasiado larga")
     if not url.lower().startswith(("http://", "https://")):
-        raise HTTPException(status_code=400, detail="URL invalida")
+        logger.warning("URL inv\u00e1lida recibida: %s", url)
+        raise HTTPException(status_code=400, detail="URL debe comenzar con http:// o https://")
     _assert_public_url(url)
 
-    options = {
-        **BASE_YTDLP_OPTIONS,
-        "skip_download": True,
-        "socket_timeout": 15,
-    }
     try:
-        with yt_dlp.YoutubeDL(options) as ydl:
-            info = ydl.extract_info(url, download=False)
-    except yt_dlp.utils.YoutubeDLError as exc:
-        logger.warning("Analisis fallido para %s: %s", url, exc)
-        raise HTTPException(status_code=400, detail="No se pudo analizar el video") from exc
-    except Exception as exc:  # noqa: BLE001
-        logger.exception("Error inesperado analizando %s", url)
-        raise HTTPException(status_code=500, detail="Error inesperado analizando el video") from exc
-
-    if info is None:
-        raise HTTPException(status_code=404, detail="No se encontro contenido en la URL indicada")
-    if info.get("_type") == "playlist":
-        raise HTTPException(status_code=400, detail="Las listas de reproduccion no estan soportadas; usa el enlace de un video individual")
+        normalized = await safe_extract_info(url)
+    except ExtractorError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.message)
 
     return {
-        "title": info.get("title"),
-        "thumbnail": _pick_thumbnail(info),
-        "duration": info.get("duration"),
-        "uploader": info.get("uploader") or info.get("channel"),
-        "webpage_url": info.get("webpage_url") or url,
-        "formats": _map_formats(info),
+        "title": normalized.title,
+        "thumbnail": normalized.thumbnail,
+        "duration": normalized.duration,
+        "uploader": normalized.uploader,
+        "webpage_url": normalized.webpage_url,
+        "formats": [
+            {
+                "format_id": f.format_id,
+                "label": f.label,
+                "height": f.height,
+                "ext": f.ext,
+                "filesize_bytes": f.filesize_bytes,
+                "filesize_human": f.filesize_human,
+                "audio_only": f.audio_only,
+                "url": f.url,
+                "vcodec": f.vcodec,
+                "acodec": f.acodec,
+            }
+            for f in normalized.formats
+        ],
+        "extractor": normalized.extractor,
+        "is_live": normalized.is_live,
     }
-
-
-def _pick_thumbnail(info: dict[str, Any]) -> Optional[str]:
-    thumbnail = info.get("thumbnail")
-    if thumbnail:
-        return thumbnail
-    thumbnails = info.get("thumbnails") or []
-    for item in reversed(thumbnails):
-        if item.get("url"):
-            return item["url"]
-    return None
-
-
-MP3_BITRATE_KBPS = 192
-
-
-def _format_bytes(fmt: dict[str, Any], duration: Optional[float]) -> Optional[int]:
-    """Tamano exacto si existe; si no, lo aproxima con el bitrate (tbr)."""
-    size = fmt.get("filesize") or fmt.get("filesize_approx")
-    if size:
-        return int(size)
-    tbr = fmt.get("tbr")
-    if tbr and duration and duration > 0:
-        return int(float(tbr) * 1000 / 8 * float(duration))
-    return None
-
-
-def _best_audio_track(info: dict[str, Any]) -> Optional[dict[str, Any]]:
-    """Pista de audio que el merge de yt-dlp combinara (m4a preferente)."""
-    tracks = [
-        f
-        for f in info.get("formats") or []
-        if f.get("vcodec") in (None, "none") and f.get("acodec") not in (None, "none")
-    ]
-    if not tracks:
-        return None
-    tracks.sort(key=lambda f: (f.get("ext") == "m4a", f.get("tbr") or 0.0), reverse=True)
-    return tracks[0]
-
-
-def _human_size(size_bytes: Optional[int]) -> Optional[str]:
-    """Convierte bytes a etiqueta legible ('45.2 MB'); None si no hay dato."""
-    if not size_bytes or size_bytes <= 0:
-        return None
-    value = float(size_bytes)
-    for unit in ("B", "KB", "MB", "GB"):
-        if value < 1024 or unit == "GB":
-            decimals = 0 if unit == "B" else 1
-            return f"{value:.{decimals}f} {unit}".replace(".0 ", " ")
-        value /= 1024
-    return None
-
-
-def _map_formats(info: dict[str, Any]) -> list[dict[str, Any]]:
-    """Consolida los formatos crudos de yt-dlp: la mejor pista por resolucion + opcion MP3."""
-    duration = info.get("duration")
-    audio_track = _best_audio_track(info)
-    audio_bytes = _format_bytes(audio_track, duration) if audio_track else None
-
-    best_by_height: dict[int, dict[str, Any]] = {}
-    for fmt in info.get("formats") or []:
-        height = fmt.get("height")
-        format_id = fmt.get("format_id")
-        if not height or not format_id or fmt.get("vcodec") in (None, "none"):
-            continue
-        video_bytes = _format_bytes(fmt, duration)
-        has_own_audio = fmt.get("acodec") not in (None, "none")
-        if video_bytes is None:
-            total_bytes: Optional[int] = None
-        elif has_own_audio or not audio_bytes:
-            total_bytes = video_bytes
-        else:
-            total_bytes = video_bytes + audio_bytes
-        candidate = {
-            "tbr": fmt.get("tbr") or 0.0,
-            "is_mp4": fmt.get("ext") == "mp4",
-            "payload": {
-                "format_id": str(format_id),
-                "label": RESOLUTION_LABELS.get(int(height), f"{int(height)}p"),
-                "height": int(height),
-                "ext": fmt.get("ext"),
-                "filesize_approx": fmt.get("filesize_approx") or fmt.get("filesize"),
-                "filesize_bytes": total_bytes,
-                "filesize_human": _human_size(total_bytes),
-            },
-        }
-        current = best_by_height.get(height)
-        if current is None or (candidate["tbr"], candidate["is_mp4"]) > (current["tbr"], candidate["is_mp4"]):
-            best_by_height[height] = candidate
-
-    formats = [entry["payload"] for _, entry in sorted(best_by_height.items(), key=lambda kv: kv[0])][::-1]
-
-    mp3_bytes = int(MP3_BITRATE_KBPS * 1000 / 8 * duration) if duration and duration > 0 else None
-    formats.append({
-        "format_id": AUDIO_FORMAT_ID,
-        "label": "Solo Audio (MP3)",
-        "audio_only": True,
-        "filesize_bytes": mp3_bytes,
-        "filesize_human": _human_size(mp3_bytes),
-    })
-    return formats
 
 
 @app.post("/api/v1/downloads", status_code=202)
