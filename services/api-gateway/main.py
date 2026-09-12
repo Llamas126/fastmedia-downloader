@@ -259,6 +259,9 @@ async def create_download(request: DownloadRequest) -> dict[str, Any]:
         async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
             response = await client.post(f"{MEDIA_PROCESSOR_URL}/process-media", json=payload)
     except httpx.HTTPError as exc:
+        logger.error(
+            "Media-processor inalcanzable al crear descarga (%s): %s",
+            MEDIA_PROCESSOR_URL, exc, exc_info=True)
         raise HTTPException(status_code=502, detail="El servicio de procesamiento no esta disponible") from exc
 
     if response.status_code >= 400:
@@ -289,6 +292,9 @@ async def download_file(job_id: str) -> StreamingResponse:
         upstream = await client.send(request, stream=True)
     except httpx.HTTPError as exc:
         await client.aclose()
+        logger.error(
+            "Media-processor inalcanzable al transmitir archivo (%s): %s",
+            MEDIA_PROCESSOR_URL, exc, exc_info=True)
         raise HTTPException(status_code=502, detail="El servicio de procesamiento no esta disponible") from exc
 
     if upstream.status_code >= 400:
@@ -327,6 +333,9 @@ async def _proxy_job_get(job_id: str) -> dict[str, Any]:
         async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
             response = await client.get(f"{MEDIA_PROCESSOR_URL}/jobs/{job_id}")
     except httpx.HTTPError as exc:
+        logger.error(
+            "Media-processor inalcanzable al consultar job %s (%s): %s",
+            job_id, MEDIA_PROCESSOR_URL, exc, exc_info=True)
         raise HTTPException(status_code=502, detail="El servicio de procesamiento no esta disponible") from exc
 
     if response.status_code >= 400:
