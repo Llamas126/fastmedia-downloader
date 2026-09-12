@@ -363,7 +363,7 @@ def _run_job(job_id: str, url: str, format_id: Optional[str], audio_only: bool) 
                     "title": title,
                     "filename": output_file.name,
                 })
-    except yt_dlp.utils.GeoRestrictedError as exc:
+    except yt_dlp.utils.GeoRestrictedError:
         logger.error("GeoRestrictedError descargando %s: %s", url, traceback.format_exc())
         _mark_job_error(job_id, "El video no está disponible en tu región")
         shutil.rmtree(job_dir, ignore_errors=True)
