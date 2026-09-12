@@ -8,7 +8,6 @@ from typing import Any, Optional
 from urllib.parse import urlparse
 
 import yt_dlp
-from fastapi import HTTPException
 from fastapi.concurrency import run_in_threadpool
 
 logger = logging.getLogger(__name__)
@@ -17,7 +16,7 @@ logger = logging.getLogger(__name__)
 # CONFIGURACIÓN BASE ROBUSTA PARA TODAS LAS PLATAFORMAS
 # ============================================================
 
-COOKIES_PATH = "/app/cookies.txt"
+COOKIES_PATH = os.getenv("FMD_COOKIES_FILE", "").strip() or "/app/cookies.txt"
 ALLOW_INSECURE_TLS = os.getenv("YTDLP_ALLOW_INSECURE_TLS", "0").lower() in ("1", "true", "yes")
 
 # Clientes alternativos de YouTube para esquivar fallos transitorios de
@@ -64,6 +63,8 @@ def _get_base_options(skip_download: bool = True) -> dict[str, Any]:
     if os.path.exists(COOKIES_PATH):
         options["cookiefile"] = COOKIES_PATH
         logger.info("Cookies cargadas desde %s", COOKIES_PATH)
+    elif os.getenv("FMD_COOKIES_FILE"):
+        logger.warning("FMD_COOKIES_FILE configurado pero el archivo no existe: %s", COOKIES_PATH)
     return options
 
 
@@ -425,6 +426,6 @@ async def safe_extract_info(url: str) -> NormalizedMediaInfo:
         logger.error("Error de validación para %s: %s", url, traceback.format_exc())
         raise ExtractorError(str(exc), 400)
 
-    except Exception as exc:
+    except Exception:
         logger.exception("Error inesperado procesando %s", url)
         raise ExtractorError("Error interno del servidor", 500)
