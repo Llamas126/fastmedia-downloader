@@ -3,6 +3,8 @@
 import logging
 import os
 import re
+import shutil
+import tempfile
 import traceback
 from dataclasses import dataclass
 from typing import Any, Optional
@@ -55,6 +57,43 @@ def is_youtube_url(url: str) -> bool:
     return host.endswith("youtube.com") or host.endswith("youtu.be")
 
 
+def _cookies_file_valid(path: str) -> bool:
+    """Valida que el archivo de cookies tenga cabecera Netscape valida.
+
+    Un archivo con formato invalido rompe la carga del cookiejar de yt-dlp
+    (LoadError: "does not look like a Netscape format cookies file"). En
+    ese caso las cookies deben ignorarse, no bloquear el analisis.
+    """
+    try:
+        if not os.path.isfile(path) or os.path.getsize(path) == 0:
+            return False
+        with open(path, "r", encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                if line.strip():
+                    return line.lstrip().startswith("# Netscape HTTP Cookie File")
+        return False
+    except (OSError, ValueError, UnicodeDecodeError):
+        return False
+
+
+def _materialize_cookies(src: str) -> Optional[str]:
+    """Copia el archivo de cookies a una ruta temporal escribible.
+
+    yt-dlp reescribe el cookiefile en close() (self.cookiejar.save()). El
+    volumen de secretos esta montado read-only, asi que se le pasa una
+    copia temporal en /tmp para que esa escritura no falle ni toque la
+    fuente original.
+    """
+    try:
+        fd, path = tempfile.mkstemp(prefix="fmd_cookies_", suffix=".txt")
+        with os.fdopen(fd, "wb") as dst, open(src, "rb") as source:
+            shutil.copyfileobj(source, dst)
+        return path
+    except OSError as exc:
+        logger.warning("No se pudo copiar el archivo de cookies %s: %s", src, exc)
+        return None
+
+
 def _get_base_options(skip_download: bool = True) -> dict[str, Any]:
     """Construye opciones base con cookies opcionales."""
     options: dict[str, Any] = {
@@ -96,8 +135,17 @@ def _get_base_options(skip_download: bool = True) -> dict[str, Any]:
         },
     }
     if os.path.exists(COOKIES_PATH):
-        options["cookiefile"] = COOKIES_PATH
-        logger.info("Cookies cargadas desde %s", COOKIES_PATH)
+        if _cookies_file_valid(COOKIES_PATH):
+            cookie_file = _materialize_cookies(COOKIES_PATH)
+            if cookie_file:
+                options["cookiefile"] = cookie_file
+                logger.info(
+                    "Cookies cargadas desde %s (copia temporal %s)", COOKIES_PATH, cookie_file)
+            else:
+                logger.warning("Cookies ignoradas: no se pudo copiar %s", COOKIES_PATH)
+        else:
+            logger.warning(
+                "Cookies ignoradas: %s no tiene formato Netscape valido", COOKIES_PATH)
     elif os.getenv("FMD_COOKIES_FILE"):
         logger.warning("FMD_COOKIES_FILE configurado pero el archivo no existe: %s", COOKIES_PATH)
     return options
@@ -566,6 +614,13 @@ def _classify_ytdlp_error(exc: Exception, url: str) -> ExtractorError:
 
     if any(t in msg for t in ("age", "18+", "adult content", "mature content", "verify your age", "confirm your age")):
         return ExtractorError("El contenido requiere verificación de edad (18+)", 401, original=exc)
+
+    if any(t in msg for t in (
+        "cookies file", "netscape format", "cookiejar", "failed to load cookies",
+    )):
+        return ExtractorError(
+            "Configuracion de cookies del servidor invalida; se ignora la sesion de cookies", 500,
+            original=exc)
 
     if any(t in msg for t in ("login", "auth", "cookies", "terminal", "membership", "premium")):
         return ExtractorError("El contenido requiere autenticación o una sesión con cookies", 401, original=exc)
