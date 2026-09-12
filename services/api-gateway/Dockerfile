@@ -17,11 +17,11 @@ WORKDIR /app
 # FFmpeg necesario para probes de duración/formato en metadatos
 RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt .
+COPY services/api-gateway/requirements.txt .
 RUN pip install -r requirements.txt
 
-COPY main.py .
-COPY ../shared /app/shared
+COPY services/api-gateway/main.py .
+COPY services/shared /app/shared
 
 RUN useradd --system --uid 1001 --create-home appuser \
  && chown -R appuser:appuser /app

@@ -17,13 +17,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg && rm -r
 
 WORKDIR /app
 
-COPY requirements.txt .
+COPY services/media-processor/requirements.txt .
 RUN pip install -r requirements.txt
 
-COPY worker.py .
-COPY ../shared /app/shared
+COPY services/media-processor/worker.py .
+COPY services/media-processor/job_store.py .
+COPY services/shared /app/shared
 
+# dir de temporales pre-creado con ownership de appuser: el volumen nombrado
+# media-storage copia estos permisos al inicializarse (uid 1001 escribible).
 RUN useradd --system --uid 1001 --create-home appuser \
+ && mkdir -p /app/temp_storage \
  && chown -R appuser:appuser /app
 
 USER appuser
