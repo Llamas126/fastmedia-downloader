@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630">
+  <defs>
+    <linearGradient id="brand" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#a78bfa"/>
+      <stop offset="1" stop-color="#67e8f9"/>
+    </linearGradient>
+  </defs>
+  <rect width="1200" height="630" fill="#0b0b14"/>
+  <circle cx="160" cy="120" r="280" fill="#7c3aed" opacity="0.18"/>
+  <circle cx="1040" cy="540" r="320" fill="#22d3ee" opacity="0.10"/>
+  <text x="600" y="255" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="72" font-weight="700" fill="url(#brand)">FastMedia Downloader</text>
+  <text x="600" y="330" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="30" fill="#cbd5e1" font-weight="600">Descargador de videos 100% gratuito e ilimitado</text>
+  <text x="600" y="378" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="26" fill="#94a3b8">Full HD (1080p) · YouTube · TikTok · Instagram · X · Twitch · Pinterest</text>
+</svg>

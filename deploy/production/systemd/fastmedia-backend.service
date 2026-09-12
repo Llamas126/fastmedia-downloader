@@ -1,0 +1,35 @@
+[Unit]
+Description=FastMedia Downloader - API Gateway (metadatos y orquestacion de descargas)
+Documentation=https://github.com/Llamas126/fastmedia-downloader
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=www-data
+Group=www-data
+WorkingDirectory=/var/www/fastmedia-downloader/api-gateway
+EnvironmentFile=/etc/fastmedia/backend.env
+Environment=MEDIA_PROCESSOR_URL=http://127.0.0.1:8001
+Environment=PYTHONPATH=/var/www/fastmedia-downloader/shared
+ExecStart=/var/www/fastmedia-downloader/api-gateway/venv/bin/uvicorn main:app --host 127.0.0.1 --port 8000 --workers 4 --proxy-headers --forwarded-allow-ips=*
+Restart=always
+RestartSec=5
+TimeoutStopSec=20
+
+# Hardening
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=no
+
+[Install]
+WantedBy=multi-user.target

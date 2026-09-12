@@ -36,6 +36,9 @@ export interface VideoFormat {
   filesize_bytes?: number | null;
   filesize_human?: string | null;
   audio_only?: boolean;
+  url?: string;           // URL directa para streams sin formatos múltiples (TikTok, IG, X, etc.)
+  vcodec?: string | null; // codec de video
+  acodec?: string | null; // codec de audio
 }
 
 export interface MediaInfo {
@@ -45,6 +48,8 @@ export interface MediaInfo {
   uploader: string | null;
   webpage_url: string;
   formats: VideoFormat[];
+  extractor?: string;     // nombre del extractor (youtube, tiktok, instagram, etc.)
+  is_live?: boolean;      // flag para contenido en vivo
 }
 
 export type JobState = "queued" | "downloading" | "processing" | "completed" | "error";
@@ -69,17 +74,44 @@ async function parseResponse<T>(response: Response): Promise<T> {
   if (!response.ok) {
     const detail =
       typeof body === "object" && body !== null && "detail" in body
-        ? String((body as { detail?: unknown }).detail)
-        : `Error ${response.status}`;
-    throw new Error(detail);
+        ? (body as { detail?: unknown }).detail
+        : null;
+
+    // FastAPI 422 validation errors return array of {loc, msg, type}
+    let message: string;
+    if (Array.isArray(detail)) {
+      message = detail.map((d: { msg?: string }) => d.msg).filter(Boolean).join(", ");
+    } else if (typeof detail === "string") {
+      message = detail;
+    } else if (detail && typeof detail === "object") {
+      const err = detail as { message?: string; msg?: string };
+      message = err.message || err.msg || `Error ${response.status}`;
+    } else {
+      message = `Error ${response.status}`;
+    }
+    throw new Error(message);
   }
   return body as T;
 }
 
+const NETWORK_ERROR_MESSAGE =
+  "No se pudo conectar con el servicio. Revisa tu conexión o inténtalo de nuevo.";
+
+async function apiFetch<T>(resource: string, init?: RequestInit): Promise<T> {
+  let response: Response;
+  try {
+    response = await fetch(resource, init);
+  } catch (error) {
+    console.error("FastMedia: fallo de red al consultar la API", error);
+    throw new Error(NETWORK_ERROR_MESSAGE);
+  }
+  return parseResponse<T>(response);
+}
+
 export async function analyzeUrl(url: string): Promise<MediaInfo> {
-  return parseResponse(
-    await fetch(`${API_BASE}/api/v1/info?url=${encodeURIComponent(url)}`, { cache: "no-store" })
-  );
+  return apiFetch<MediaInfo>(`${API_BASE}/api/v1/info?url=${encodeURIComponent(url)}`, {
+    cache: "no-store",
+  });
 }
 
 export interface StartDownloadPayload {
@@ -89,21 +121,21 @@ export interface StartDownloadPayload {
 }
 
 export async function startDownload(payload: StartDownloadPayload): Promise<{ job_id: string }> {
-  return parseResponse(
-    await fetch(`${API_BASE}/api/v1/downloads`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-    })
-  );
+  return apiFetch<{ job_id: string }>(`${API_BASE}/api/v1/downloads`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
 }
 
 export async function getJobStatus(jobId: string): Promise<JobStatus> {
-  return parseResponse(await fetch(`${API_BASE}/api/v1/downloads/${jobId}`, { cache: "no-store" }));
+  return apiFetch<JobStatus>(`${API_BASE}/api/v1/downloads/${jobId}`, { cache: "no-store" });
 }
 
+const MEDIA_BASE = process.env.NEXT_PUBLIC_MEDIA_URL ?? API_BASE;
+
 export function getFileUrl(jobId: string): string {
-  return `${API_BASE}/api/v1/downloads/${jobId}/file`;
+  return `${MEDIA_BASE}/api/v1/downloads/${jobId}/file`;
 }
 
 export function formatDuration(totalSeconds: number | null): string {

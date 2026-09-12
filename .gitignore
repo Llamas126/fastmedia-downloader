@@ -13,6 +13,7 @@ yarn-error.log*
 .env
 .env.local
 .env.*.local
+.env.production
 
 # ===== Python =====
 __pycache__/
@@ -28,6 +29,11 @@ env/
 # ===== Almacenamiento temporal de descargas (Media Processor) =====
 services/media-processor/temp_storage/*
 !services/media-processor/temp_storage/.gitkeep
+
+# ===== Secrets (cookies del navegador; NO commitear) =====
+secrets/cookies.txt
+secrets/*.txt
+!secrets/cookies.txt.example
 
 # ===== Logs =====
 logs/

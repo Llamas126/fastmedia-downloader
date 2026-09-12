@@ -33,8 +33,10 @@ import logging
 import os
 import re
 import shutil
+import sys
 import threading
 import time
+import traceback
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -45,6 +47,14 @@ from fastapi import BackgroundTasks, FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, field_validator
 
+try:
+    from extractor import DOWNLOAD_OPTIONS_BASE, YOUTUBE_CLIENT_FALLBACKS, is_youtube_url, merge_extractor_args
+except ModuleNotFoundError:
+    _SHARED_DIR = Path(__file__).resolve().parent.parent / "shared"
+    if str(_SHARED_DIR) not in sys.path:
+        sys.path.insert(0, str(_SHARED_DIR))
+    from extractor import DOWNLOAD_OPTIONS_BASE, YOUTUBE_CLIENT_FALLBACKS, is_youtube_url, merge_extractor_args
+
 logger = logging.getLogger(__name__)
 
 TEMP_STORAGE = Path(os.getenv("TEMP_STORAGE_DIR", "/app/temp_storage"))
@@ -53,11 +63,6 @@ CLEANUP_INTERVAL_SECONDS = 60
 
 JOB_ID_PATTERN = re.compile(r"^[a-f0-9]{32}$")
 FORMAT_ID_PATTERN = re.compile(r"^[A-Za-z0-9_.\-]{1,32}$")
-
-USER_AGENT = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
-)
 
 MAX_CONCURRENT_JOBS = int(os.getenv("MAX_CONCURRENT_JOBS", "3"))
 MAX_JOB_MINUTES = int(os.getenv("MAX_JOB_MINUTES", "20"))
@@ -271,25 +276,59 @@ def _largest_output_file(job_dir: Path) -> Path:
     return max(candidates, key=lambda p: p.stat().st_size)
 
 
+def _mark_job_error(job_id: str, error: str) -> None:
+    with JOBS_LOCK:
+        if job_id in JOBS:
+            JOBS[job_id].update({
+                "status": "error",
+                "progress": 0.0,
+                "stage": "error",
+                "error": error,
+            })
+
+
+def _download_with_fallback(options: dict[str, Any], url: str) -> dict[str, Any]:
+    """Descarga con yt-dlp; si YouTube falla por nsig/player response se
+    reintenta con player clients alternativos antes de rendirse."""
+    try:
+        with yt_dlp.YoutubeDL(options) as ydl:
+            return ydl.extract_info(url, download=True)
+    except (yt_dlp.utils.ExtractorError, yt_dlp.utils.DownloadError) as exc:
+        if not is_youtube_url(url):
+            raise
+        logger.info("Reintentando descarga de YouTube con clientes alternativos: %s", url)
+        for extra_args in YOUTUBE_CLIENT_FALLBACKS:
+            opts = dict(options)
+            opts["extractor_args"] = merge_extractor_args(options.get("extractor_args"), extra_args)
+            try:
+                with yt_dlp.YoutubeDL(opts) as ydl:
+                    return ydl.extract_info(url, download=True)
+            except (yt_dlp.utils.ExtractorError, yt_dlp.utils.DownloadError):
+                continue
+        # Ultimo respaldo: descarga por defecto de yt-dlp (sin extractor_args)
+        # para videos antiguos/atipicos donde los clientes forzados no entregan
+        # formatos descargables.
+        logger.info("Fallback descarga por defecto (sin extractor_args) para %s", url)
+        opts = dict(options)
+        opts.pop("extractor_args", None)
+        try:
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                return ydl.extract_info(url, download=True)
+        except (yt_dlp.utils.ExtractorError, yt_dlp.utils.DownloadError):
+            pass
+        raise exc
+
+
 def _run_job(job_id: str, url: str, format_id: Optional[str], audio_only: bool) -> None:
     """Tarea en segundo plano: descarga con yt-dlp + post-proceso FFmpeg."""
     job_dir = TEMP_STORAGE / job_id
     try:
         job_dir.mkdir(parents=True, exist_ok=True)
 
+        # Usar opciones base robustas del módulo compartido
         options: dict[str, Any] = {
+            **DOWNLOAD_OPTIONS_BASE,
             "outtmpl": str(job_dir / "%(title).180B.%(ext)s"),
-            "quiet": True,
-            "no_warnings": True,
-            "noplaylist": True,
-            "socket_timeout": 30,
-            "retries": 3,
-            "nocheckcertificate": ALLOW_INSECURE_TLS,
-            "http_headers": {"User-Agent": USER_AGENT},
-            "extractor_retries": 3,
-            "fragment_retries": 10,
-            "skip_unavailable_fragments": True,
-            "windowsfilenames": True,
             "max_filesize": MAX_FILESIZE_MB * 1024 * 1024,
             "progress_hooks": [_progress_hook(job_id)],
         }
@@ -304,16 +343,26 @@ def _run_job(job_id: str, url: str, format_id: Optional[str], audio_only: bool) 
                 }],
             })
         else:
-            # Descarga la pista de video elegida + la mejor pista de audio y
-            # ensambla ambas en MP4 mediante FFmpegMergerPP.
-            options.update({
-                "format": f"{format_id}+bestaudio[ext=m4a]/bestaudio+bestaudio/best",
-                "merge_output_format": "mp4",
-            })
+            # Para formatos directos (TikTok, IG, X): descarga directa sin merge.
+            # format_id sintéticos ("direct"/"audio_direct") se traducen a "best".
+            # Para YouTube con tracks separados: merge de video+audio.
+            if format_id in ("direct", "audio_direct"):
+                options.update({"format": "best"})
+            elif format_id:
+                options.update({
+                    # Cadena de respaldo: video+audio separados, luego el
+                    # formato muxed tal cual, y al final el selector generico.
+                    "format": f"{format_id}+bestaudio/{format_id}/bestvideo+bestaudio/best",
+                    "merge_output_format": "mp4",
+                })
+            else:
+                options.update({
+                    "format": "bestvideo+bestaudio/best",
+                    "merge_output_format": "mp4",
+                })
 
-        with yt_dlp.YoutubeDL(options) as ydl:
-            info = ydl.extract_info(url, download=True)
-            title = (info or {}).get("title")
+        info = _download_with_fallback(options, url)
+        title = (info or {}).get("title")
 
         output_file = _largest_output_file(job_dir)
         logger.info("Job %s completado: %s (%d bytes)", job_id, output_file.name, output_file.stat().st_size)
@@ -327,15 +376,21 @@ def _run_job(job_id: str, url: str, format_id: Optional[str], audio_only: bool) 
                     "title": title,
                     "filename": output_file.name,
                 })
+    except yt_dlp.utils.GeoRestrictedError:
+        logger.error("GeoRestrictedError descargando %s: %s", url, traceback.format_exc())
+        _mark_job_error(job_id, "El video no está disponible en tu región")
+        shutil.rmtree(job_dir, ignore_errors=True)
+    except yt_dlp.utils.DownloadError as exc:
+        logger.error("Error descargando %s: %s", url, traceback.format_exc())
+        _mark_job_error(job_id, "Error de descarga: " + str(exc)[:400])
+        shutil.rmtree(job_dir, ignore_errors=True)
+    except yt_dlp.utils.ExtractorError as exc:
+        logger.error("Error de extracción para %s: %s", url, traceback.format_exc())
+        _mark_job_error(job_id, "Error de extracción: " + str(exc)[:400])
+        shutil.rmtree(job_dir, ignore_errors=True)
     except Exception as exc:
-        with JOBS_LOCK:
-            if job_id in JOBS:
-                JOBS[job_id].update({
-                    "status": "error",
-                    "progress": 0.0,
-                    "stage": "error",
-                    "error": str(exc)[:500],
-                })
+        logger.exception("Error inesperado en job %s: %s", job_id, exc)
+        _mark_job_error(job_id, "Error interno: " + str(exc)[:400])
         shutil.rmtree(job_dir, ignore_errors=True)
 
 

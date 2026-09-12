@@ -1,0 +1,17 @@
+# FastMedia Downloader - mantenimiento automatico del backend (VPS, sin Docker)
+# Instalacion (CRONTAB DE ROOT: www-data no puede hacer systemctl restart):
+#   sudo crontab deploy/production/crontab
+#
+# Actualiza yt-dlp a diario dentro de cada venv (como www-data para mantener
+# la propiedad del venv) y reinicia el servicio afectado SOLO si el upgrade
+# finalizo correctamente. Las marcas de tiempo estan desfasadas 5 minutos
+# para no reiniciar ambos servicios a la vez.
+
+SHELL=/bin/bash
+MAILTO=""
+
+# Api Gateway (metadatos): upgrade yt-dlp 05:30 UTC
+30 5 * * * sudo -u www-data /var/www/fastmedia-downloader/api-gateway/venv/bin/pip install -q --no-cache-dir --upgrade yt-dlp >> /var/log/fastmedia/yt-dlp.log 2>&1 && systemctl restart fastmedia-backend.service
+
+# Media Processor (descargas): upgrade yt-dlp 05:35 UTC
+35 5 * * * sudo -u www-data /var/www/fastmedia-downloader/media-processor/venv/bin/pip install -q --no-cache-dir --upgrade yt-dlp >> /var/log/fastmedia/yt-dlp.log 2>&1 && systemctl restart fastmedia-media.service
