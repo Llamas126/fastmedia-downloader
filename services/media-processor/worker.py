@@ -339,7 +339,9 @@ def _run_job(job_id: str, url: str, format_id: Optional[str], audio_only: bool) 
                 options.update({"format": "best"})
             elif format_id:
                 options.update({
-                    "format": f"{format_id}+bestaudio/best",
+                    # Cadena de respaldo: video+audio separados, luego el
+                    # formato muxed tal cual, y al final el selector generico.
+                    "format": f"{format_id}+bestaudio/{format_id}/bestvideo+bestaudio/best",
                     "merge_output_format": "mp4",
                 })
             else:

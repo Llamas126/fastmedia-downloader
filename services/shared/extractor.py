@@ -79,6 +79,9 @@ def _get_base_options(skip_download: bool = True) -> dict[str, Any]:
         "extractor_retries": 3,
         "fragment_retries": 3,
         "skip_unavailable_fragments": True,
+        # Selector de formato por defecto robusto: prefiere video+audio
+        # separados y cae al mejor formato simple si el streaming no los separa.
+        "format": "bestvideo+bestaudio/best",
         # Clientes móviles de YouTube prioritarios desde el primer intento.
         # En redes de datacenter (Oracle Cloud, VPS) el cliente web por
         # defecto dispara "The page needs to be reloaded" (firma NSIG).
