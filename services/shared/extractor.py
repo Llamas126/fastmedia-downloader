@@ -2,6 +2,7 @@
 
 import logging
 import os
+import re
 import traceback
 from dataclasses import dataclass
 from typing import Any, Optional
@@ -407,40 +408,72 @@ class ExtractorError(Exception):
 def _classify_ytdlp_error(exc: Exception, url: str) -> ExtractorError:
     """Traduce un error de yt-dlp a un ExtractorError con estado HTTP coherente.
 
-    Solo se usa 422 cuando la plataforma realmente no es soportada; los
-    fallos habituales de YouTube (nsig, bot-check, región...) devuelven
-    códigos accionables (400/401/403/429).
+    Las categorías aplican para todas las plataformas (bot-check, geo,
+    contenido privado/eliminado, login/18+...). Solo se usa 422 cuando la
+    plataforma realmente no es soportada o el error es estructural.
     """
     if isinstance(exc, yt_dlp.utils.GeoRestrictedError):
-        return ExtractorError("El video no está disponible en tu región", 403, original=exc)
+        return ExtractorError("El contenido no está disponible en tu región", 403, original=exc)
 
     msg = str(exc).lower()
+    host = urlparse(url).hostname or url
 
-    if "sign in" in msg or "bot" in msg or "confirm you" in msg or "verify you" in msg:
-        return ExtractorError("La plataforma pide verificación anti-bot; inténtalo más tarde", 400, original=exc)
+    if any(t in msg for t in ("geo", "country", "not available in your country")):
+        return ExtractorError("El contenido no está disponible en tu región", 403, original=exc)
 
-    if "private" in msg or "deleted" in msg or "removed" in msg or "unavailable" in msg:
-        return ExtractorError("El video es privado, fue eliminado o no está disponible", 400, original=exc)
+    if any(t in msg for t in ("try again later", "rate-limit", "rate limited", "too many requests", "429")):
+        return ExtractorError("La plataforma limitó las peticiones; inténtalo más tarde", 429, original=exc)
 
-    if "geo" in msg or "country" in msg or "not available in your country":
-        return ExtractorError("El video no está disponible en tu región", 403, original=exc)
+    http_m = re.search(r"http error (?P<code>\d{3})", msg)
+    if http_m:
+        code = int(http_m.group("code"))
+        if code == 429:
+            return ExtractorError("La plataforma limitó las peticiones; inténtalo más tarde", 429, original=exc)
+        if code in (404, 410, 451):
+            return ExtractorError("El contenido fue eliminado o ya no está disponible", 400, original=exc)
+        if code == 401:
+            return ExtractorError("El contenido requiere autenticación o verificación de edad", 401, original=exc)
+        if code in (400, 405):
+            return ExtractorError("Solicitud inválida o formato no soportado por la plataforma", 400, original=exc)
+        if 500 <= code < 600:
+            return ExtractorError(
+                "Error temporal en la plataforma; inténtalo de nuevo en unos segundos", 429, original=exc)
+        if code == 403:
+            return ExtractorError(
+                "El contenido no está disponible en tu región, fue removido o la plataforma bloquea el acceso",
+                403,
+                original=exc,
+            )
 
-    if "login" in msg or "auth" in msg or "cookies" in msg or "terminal" in msg:
-        return ExtractorError("El video requiere autenticación (cookies)", 401, original=exc)
+    transient = any(
+        t in msg
+        for t in (
+            "nsig", "player response", "throttl", "timed out", "http error",
+            "bad request", "unable to extract", "requested format", "initial player",
+            "no video formats", "connection", "timeout", "temporary",
+        )
+    )
+    if transient:
+        return ExtractorError("Error temporal en la plataforma; inténtalo de nuevo en unos segundos", 429, original=exc)
+
+    if any(t in msg for t in ("sign in", "confirm you", "verify you", "bot", "captcha")):
+        return ExtractorError(
+            "La plataforma pide verificación anti-bot o captcha; inténtalo más tarde", 400, original=exc)
+
+    if any(t in msg for t in ("private", "deleted", "removed", "unavailable", "not available", "no longer")):
+        return ExtractorError("El contenido es privado, fue eliminado o no está disponible", 400, original=exc)
+
+    if any(t in msg for t in ("age", "18+", "adult content", "mature content", "verify your age", "confirm your age")):
+        return ExtractorError("El contenido requiere verificación de edad (18+)", 401, original=exc)
+
+    if any(t in msg for t in ("login", "auth", "cookies", "terminal", "membership")):
+        return ExtractorError("El contenido requiere autenticación (cookies)", 401, original=exc)
 
     if is_youtube_url(url):
-        transient = any(
-            token in msg
-            for token in (
-                "nsig", "player response", "throttl", "timed out", "http error",
-                "bad request", "unable to extract", "requested format", "initial player",
-            )
-        )
-        if transient:
-            return ExtractorError("Error temporal de YouTube; inténtalo de nuevo en unos segundos", 429, original=exc)
         return ExtractorError("No se pudo extraer el video de YouTube", 400, original=exc)
 
-    return ExtractorError("Plataforma no soportada o estructura de datos cambiada", 422, original=exc)
+    return ExtractorError(
+        f"No se pudo extraer el contenido de {host} o la plataforma no es soportada", 422, original=exc)
 
 
 async def safe_extract_info(url: str) -> NormalizedMediaInfo:
@@ -451,7 +484,13 @@ async def safe_extract_info(url: str) -> NormalizedMediaInfo:
         if raw_info is None:
             raise ExtractorError("No se encontró contenido en la URL", 404)
 
-        return normalize_info(raw_info, url)
+        result = normalize_info(raw_info, url)
+        if result.is_live:
+            raise ExtractorError(
+                "El contenido es una transmisión en vivo y no se puede descargar como archivo; usa un clip o VOD",
+                400,
+            )
+        return result
 
     except yt_dlp.utils.GeoRestrictedError as exc:
         logger.error("GeoRestrictedError procesando %s: %s", url, traceback.format_exc())
