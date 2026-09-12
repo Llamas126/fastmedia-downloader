@@ -79,14 +79,15 @@ def _get_base_options(skip_download: bool = True) -> dict[str, Any]:
         "extractor_retries": 3,
         "fragment_retries": 3,
         "skip_unavailable_fragments": True,
-        # Forzar clientes móviles/iOS de YouTube desde el primer intento.
+        # Clientes móviles de YouTube prioritarios desde el primer intento.
         # En redes de datacenter (Oracle Cloud, VPS) el cliente web por
         # defecto dispara "The page needs to be reloaded" (firma NSIG).
-        # ios/android/mweb no exigen la firma del cliente web.
+        # android/ios no exigen la firma del cliente web; web queda como
+        # respaldo ante errores de formatos o geobloqueo.
         "extractor_args": {
             "youtube": {
-                "player_client": ["ios", "android", "mweb"],
-                "player_skip": ["webpage", "configs"],
+                "player_client": ["android", "ios", "web"],
+                "player_skip": ["configs"],
             }
         },
     }
