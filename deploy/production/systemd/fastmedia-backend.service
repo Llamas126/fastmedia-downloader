@@ -11,6 +11,7 @@ Group=www-data
 WorkingDirectory=/var/www/fastmedia-downloader/api-gateway
 EnvironmentFile=/etc/fastmedia/backend.env
 Environment=MEDIA_PROCESSOR_URL=http://127.0.0.1:8001
+Environment=PYTHONPATH=/var/www/fastmedia-downloader/shared
 ExecStart=/var/www/fastmedia-downloader/api-gateway/venv/bin/uvicorn main:app --host 127.0.0.1 --port 8000 --workers 4 --proxy-headers --forwarded-allow-ips=*
 Restart=always
 RestartSec=5

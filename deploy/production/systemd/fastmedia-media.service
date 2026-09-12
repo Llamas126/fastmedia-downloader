@@ -11,6 +11,7 @@ Group=www-data
 WorkingDirectory=/var/www/fastmedia-downloader/media-processor
 EnvironmentFile=/etc/fastmedia/media.env
 Environment=TEMP_STORAGE_DIR=/var/www/fastmedia-downloader/temp_storage
+Environment=PYTHONPATH=/var/www/fastmedia-downloader/shared
 # Estado de los jobs y WAL en SQLite (job_store.py): los reinicios marcan los
 # jobs activos como interrupted_by_restart; por eso un solo worker basta pero
 # no es obligatorio (la persistencia vive en disco, no en memoria).
