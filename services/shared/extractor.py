@@ -290,15 +290,20 @@ def _normalize_formats(info: dict[str, Any], duration: int) -> list[NormalizedFo
         formats = _process_format_list(raw_formats, duration)
 
     if not formats and info.get("url"):
+        best_raw = _best_raw_format(info)
+        height = _derive_height(best_raw) if best_raw else None
+        ext = (best_raw or {}).get("ext") or info.get("ext") or "mp4"
+        url = (best_raw or {}).get("url") or info.get("url")
         formats.append(NormalizedFormat(
             format_id="direct",
-            label="Calidad original",
-            ext=info.get("ext") or "mp4",
-            url=info["url"],
+            label=_height_to_label(height) if height else "Calidad original",
+            height=height,
+            ext=ext,
+            url=url,
             filesize_bytes=_estimate_size(info),
             filesize_human=_human_size(_estimate_size(info)),
-            vcodec=info.get("vcodec"),
-            acodec=info.get("acodec"),
+            vcodec=(best_raw or info).get("vcodec"),
+            acodec=(best_raw or info).get("acodec"),
         ))
 
     if not formats and info.get("acodec") not in (None, "none"):
@@ -325,27 +330,93 @@ def _normalize_formats(info: dict[str, Any], duration: int) -> list[NormalizedFo
     return formats
 
 
+def _derive_height(fmt: dict[str, Any]) -> Optional[int]:
+    """Deriva la altura en pixeles del formato si no viene explicita.
+
+    Varios extractores (XNXX, XVideos, Generic) publican formatos sin
+    height ni vcodec; la resolucion suele vivir en 'resolution' ("WxH").
+    """
+    height = _to_int(fmt.get("height"))
+    if height:
+        return height
+
+    res = fmt.get("resolution")
+    if isinstance(res, str) and "x" in res:
+        parts = res.lower().split("x")
+        if len(parts) == 2:
+            h = _to_int(parts[1])
+            if h:
+                return h
+
+    width = _to_int(fmt.get("width"))
+    if width and width >= 320:
+        return round(width * 9 / 16)
+
+    note = f"{fmt.get('format_id', '')} {fmt.get('format_note', '')}"
+    m = re.search(r"(\d{2,4})p", note)
+    if m:
+        return int(m.group(1))
+    return None
+
+
+def _format_label(fmt: dict[str, Any], format_id: str) -> str:
+    """Etiqueta legible para formatos sin resolucion conocida."""
+    note = f"{format_id} {fmt.get('format_note', '')}"
+    m = re.search(r"(\d{2,4})p", note)
+    if m:
+        return f"{m.group(1)}p"
+    return "Calidad original"
+
+
+def _best_raw_format(info: dict[str, Any]) -> Optional[dict[str, Any]]:
+    """El mejor formato crudo (max height/tbr) con URL directa."""
+    candidates = [f for f in (info.get("formats") or []) if f.get("url")]
+    if not candidates:
+        return None
+    return max(
+        candidates,
+        key=lambda f: (_inherit_height(f) or 0, _to_float(f.get("tbr")) or 0),
+    )
+
+
+def _inherit_height(fmt: dict[str, Any]) -> int:
+    return _derive_height(fmt) or 0
+
+
 def _process_format_list(raw_formats: list[dict], duration: int) -> list[NormalizedFormat]:
+    """Normaliza formatos crudos de yt-dlp por resolucion.
+
+    No descarta entradas sin height/vcodec: XNXX y XVideos publican HLS sin
+    vcodec y progressive sin resolucion. Solo se omiten los audios puros
+    (vcodec == "none") y los formatos sin URL.
+    """
     best_by_height: dict[int, NormalizedFormat] = {}
+    best_score: dict[int, float] = {}
+    seen_urls: set[str] = set()
 
     for fmt in raw_formats:
-        if fmt.get("vcodec") in (None, "none"):
-            continue
-
-        height = _to_int(fmt.get("height"))
+        url = fmt.get("url") or fmt.get("manifest_url")
         format_id = fmt.get("format_id")
-        if not height or not format_id:
+        if not url or not format_id:
             continue
+        if fmt.get("vcodec") == "none":
+            continue
+        if url in seen_urls:
+            continue
+        seen_urls.add(url)
 
+        height = _derive_height(fmt)
         filesize = _to_int(fmt.get("filesize")) or _to_int(fmt.get("filesize_approx"))
         if not filesize and duration > 0:
             tbr = _to_float(fmt.get("tbr"))
             if tbr:
                 filesize = int(tbr * 1000 / 8 * duration)
 
+        score = _to_float(fmt.get("tbr")) or filesize or 0
+
         nf = NormalizedFormat(
             format_id=str(format_id),
-            label=_height_to_label(height),
+            label=_height_to_label(height) if height else _format_label(fmt, str(format_id)),
             height=height,
             ext=fmt.get("ext"),
             filesize_bytes=filesize,
@@ -354,9 +425,11 @@ def _process_format_list(raw_formats: list[dict], duration: int) -> list[Normali
             acodec=fmt.get("acodec"),
         )
 
-        current = best_by_height.get(height)
-        if current is None or (_to_float(fmt.get("tbr")) or 0) > (current.filesize_bytes or 0):
-            best_by_height[height] = nf
+        key = height or 0
+        current = best_by_height.get(key)
+        if current is None or score > best_score.get(key, 0):
+            best_by_height[key] = nf
+            best_score[key] = score
 
     return [best_by_height[h] for h in sorted(best_by_height.keys(), reverse=True)]
 
@@ -429,8 +502,11 @@ def _classify_ytdlp_error(exc: Exception, url: str) -> ExtractorError:
         code = int(http_m.group("code"))
         if code == 429:
             return ExtractorError("La plataforma limitó las peticiones; inténtalo más tarde", 429, original=exc)
-        if code in (404, 410, 451):
+        if code in (404, 451):
             return ExtractorError("El contenido fue eliminado o ya no está disponible", 400, original=exc)
+        if code == 410:
+            return ExtractorError(
+                "El enlace está muerto: el video fue eliminado o la URL cambió", 410, original=exc)
         if code == 401:
             return ExtractorError("El contenido requiere autenticación o verificación de edad", 401, original=exc)
         if code in (400, 405):
@@ -491,8 +567,8 @@ def _classify_ytdlp_error(exc: Exception, url: str) -> ExtractorError:
     if any(t in msg for t in ("age", "18+", "adult content", "mature content", "verify your age", "confirm your age")):
         return ExtractorError("El contenido requiere verificación de edad (18+)", 401, original=exc)
 
-    if any(t in msg for t in ("login", "auth", "cookies", "terminal", "membership")):
-        return ExtractorError("El contenido requiere autenticación (cookies)", 401, original=exc)
+    if any(t in msg for t in ("login", "auth", "cookies", "terminal", "membership", "premium")):
+        return ExtractorError("El contenido requiere autenticación o una sesión con cookies", 401, original=exc)
 
     if is_youtube_url(url):
         return ExtractorError("No se pudo extraer el video de YouTube", 400, original=exc)
