@@ -305,6 +305,17 @@ def _download_with_fallback(options: dict[str, Any], url: str) -> dict[str, Any]
                     return ydl.extract_info(url, download=True)
             except (yt_dlp.utils.ExtractorError, yt_dlp.utils.DownloadError):
                 continue
+        # Ultimo respaldo: descarga por defecto de yt-dlp (sin extractor_args)
+        # para videos antiguos/atipicos donde los clientes forzados no entregan
+        # formatos descargables.
+        logger.info("Fallback descarga por defecto (sin extractor_args) para %s", url)
+        opts = dict(options)
+        opts.pop("extractor_args", None)
+        try:
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                return ydl.extract_info(url, download=True)
+        except (yt_dlp.utils.ExtractorError, yt_dlp.utils.DownloadError):
+            pass
         raise exc
 
 

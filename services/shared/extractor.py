@@ -158,9 +158,11 @@ async def extract_info_async(url: str, download: bool = False) -> dict[str, Any]
     """
     options = _get_base_options(skip_download=not download)
 
-    def _extract(extra_args: Optional[dict[str, Any]] = None) -> dict[str, Any]:
+    def _extract(extra_args: Optional[dict[str, Any]] = None, reset: bool = False) -> dict[str, Any]:
         opts = dict(options)
-        if extra_args:
+        if reset:
+            opts.pop("extractor_args", None)
+        elif extra_args:
             opts["extractor_args"] = merge_extractor_args(options.get("extractor_args"), extra_args)
         with yt_dlp.YoutubeDL(opts) as ydl:
             return ydl.extract_info(url, download=download)
@@ -176,6 +178,14 @@ async def extract_info_async(url: str, download: bool = False) -> dict[str, Any]
                 return await run_in_threadpool(_extract, extra_args)
             except (yt_dlp.utils.ExtractorError, yt_dlp.utils.DownloadError):
                 continue
+        # Ultimo respaldo: extraccion por defecto de yt-dlp (sin extractor_args).
+        # Algunos videos antiguos/atipicos no exponen formatos con los clientes
+        # forzados; la extraccion por defecto los resuelve.
+        try:
+            logger.info("Fallback extraccion por defecto (sin extractor_args) para %s", url)
+            return await run_in_threadpool(_extract, reset=True)
+        except (yt_dlp.utils.ExtractorError, yt_dlp.utils.DownloadError):
+            pass
         raise exc
 
 
