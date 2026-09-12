@@ -21,6 +21,7 @@ services:
     cap_drop:
       - ALL
     cap_add:
+      - CHOWN
       - SETUID
       - SETGID
     restart: unless-stopped
@@ -28,18 +29,24 @@ services:
       - fastmedia-net
 
   api-gateway:
-    build: ./services/api-gateway
+    build:
+      context: .
+      dockerfile: services/api-gateway/Dockerfile
     ports:
-      - "${API_GATEWAY_PORT:-8000}:8000"
+      - "127.0.0.1:${API_GATEWAY_PORT:-8000}:8000"
+    init: true
     environment:
       MEDIA_PROCESSOR_URL: http://media-processor:8001
       ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://localhost:3000}
-      ALLOWED_ORIGIN_REGEX: ${ALLOWED_ORIGIN_REGEX:-}
+      ALLOWED_ORIGIN_REGEX: ${ALLOWED_ORIGIN_REGEX:-.*\.pages\.dev$}
       RATE_LIMIT_PER_MINUTE: ${RATE_LIMIT_PER_MINUTE:-60}
       DOWNLOADS_PER_MINUTE: ${DOWNLOADS_PER_MINUTE:-10}
       MAX_BODY_BYTES: ${MAX_BODY_BYTES:-65536}
       ALLOW_PRIVATE_URLS: ${ALLOW_PRIVATE_URLS:-0}
       YTDLP_ALLOW_INSECURE_TLS: ${YTDLP_ALLOW_INSECURE_TLS:-0}
+      FMD_COOKIES_FILE: ${FMD_COOKIES_FILE:-/app/secrets/cookies.txt}
+    volumes:
+      - ./secrets:/app/secrets:ro
     depends_on:
       media-processor:
         condition: service_healthy
@@ -54,9 +61,12 @@ services:
       - fastmedia-net
 
   media-processor:
-    build: ./services/media-processor
-    expose:
-      - "8001"
+    build:
+      context: .
+      dockerfile: services/media-processor/Dockerfile
+    ports:
+      - "127.0.0.1:${MEDIA_PORT:-8001}:8001"
+    init: true
     environment:
       TEMP_STORAGE_DIR: /app/temp_storage
       FILE_TTL_MINUTES: ${FILE_TTL_MINUTES:-30}
@@ -64,8 +74,10 @@ services:
       MAX_JOB_MINUTES: ${MAX_JOB_MINUTES:-20}
       MAX_FILESIZE_MB: ${MAX_FILESIZE_MB:-2048}
       YTDLP_ALLOW_INSECURE_TLS: ${YTDLP_ALLOW_INSECURE_TLS:-0}
+      FMD_COOKIES_FILE: ${FMD_COOKIES_FILE:-/app/secrets/cookies.txt}
     volumes:
-      - ./services/media-processor/temp_storage:/app/temp_storage
+      - media-storage:/app/temp_storage
+      - ./secrets:/app/secrets:ro
     mem_limit: 2g
     cpus: 1.5
     security_opt:
@@ -75,6 +87,9 @@ services:
     restart: unless-stopped
     networks:
       - fastmedia-net
+
+volumes:
+  media-storage:
 
 networks:
   fastmedia-net:
