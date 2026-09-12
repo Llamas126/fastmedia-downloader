@@ -48,12 +48,12 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, field_validator
 
 try:
-    from extractor import safe_extract_info, NormalizedMediaInfo, ExtractorError
+    from extractor import safe_extract_info, ExtractorError
 except ModuleNotFoundError:
     _SHARED_DIR = Path(__file__).resolve().parent.parent / "shared"
     if str(_SHARED_DIR) not in sys.path:
         sys.path.insert(0, str(_SHARED_DIR))
-    from extractor import safe_extract_info, NormalizedMediaInfo, ExtractorError
+    from extractor import safe_extract_info, ExtractorError
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +63,11 @@ ALLOWED_ORIGINS = [
     for origin in os.getenv("ALLOWED_ORIGINS", "http://localhost:3000").split(",")
     if origin.strip()
 ]
+# Regex adicional de origenes permitidos (p. ej. previews de Cloudflare Pages).
+# Starlette aplica fullmatch: el patron debe cubrir la URL completa.
+ALLOWED_ORIGIN_REGEX = os.getenv(
+    "ALLOWED_ORIGIN_REGEX", r"^http://localhost(:\d+)?$|.*\.pages\.dev$"
+)
 
 RATE_LIMIT_PER_MINUTE = int(os.getenv("RATE_LIMIT_PER_MINUTE", "60"))
 DOWNLOADS_PER_MINUTE = int(os.getenv("DOWNLOADS_PER_MINUTE", "10"))
@@ -72,8 +77,6 @@ ALLOW_INSECURE_TLS = os.getenv("YTDLP_ALLOW_INSECURE_TLS", "0").lower() in ("1",
 
 JOB_ID_PATTERN = re.compile(r"^[a-f0-9]{32}$")
 FORMAT_ID_PATTERN = re.compile(r"^[A-Za-z0-9_.\-]{1,32}$")
-
-
 
 HTTP_TIMEOUT = httpx.Timeout(30.0, connect=10.0)
 STREAM_TIMEOUT = httpx.Timeout(None, connect=15.0)
@@ -118,6 +121,7 @@ def _assert_public_url(url: str) -> None:
         if not ip.is_global:
             raise HTTPException(status_code=400, detail="La URL apunta a una direccion no publica")
 
+
 app = FastAPI(
     title="FastMedia Downloader - API Gateway",
     description="Extraccion de metadatos y orquestacion de descargas multimedia.",
@@ -129,6 +133,7 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
+    allow_origin_regex=ALLOWED_ORIGIN_REGEX or None,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
