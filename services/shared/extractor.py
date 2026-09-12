@@ -29,6 +29,26 @@ YOUTUBE_CLIENT_FALLBACKS: list[dict[str, Any]] = [
 ]
 
 
+def merge_extractor_args(
+    base: Optional[dict[str, Any]], override: Optional[dict[str, Any]]
+) -> dict[str, Any]:
+    """Fusiona extractor_args de yt-dlp conservando las claves base.
+
+    Solo reemplaza lo que el override define (p. ej. player_client) y
+    mantiene el resto (player_skip) en cada reintento de cliente.
+    """
+    result: dict[str, Any] = dict(base) if base else {}
+    if not override:
+        return result
+    for key, value in override.items():
+        current = result.get(key)
+        if isinstance(current, dict) and isinstance(value, dict):
+            result[key] = {**current, **value}
+        else:
+            result[key] = value
+    return result
+
+
 def is_youtube_url(url: str) -> bool:
     host = (urlparse(url).hostname or "").lower()
     return host.endswith("youtube.com") or host.endswith("youtu.be")
@@ -59,6 +79,16 @@ def _get_base_options(skip_download: bool = True) -> dict[str, Any]:
         "extractor_retries": 3,
         "fragment_retries": 3,
         "skip_unavailable_fragments": True,
+        # Forzar clientes móviles/iOS de YouTube desde el primer intento.
+        # En redes de datacenter (Oracle Cloud, VPS) el cliente web por
+        # defecto dispara "The page needs to be reloaded" (firma NSIG).
+        # ios/android/mweb no exigen la firma del cliente web.
+        "extractor_args": {
+            "youtube": {
+                "player_client": ["ios", "android", "mweb"],
+                "player_skip": ["webpage", "configs"],
+            }
+        },
     }
     if os.path.exists(COOKIES_PATH):
         options["cookiefile"] = COOKIES_PATH
@@ -127,7 +157,7 @@ async def extract_info_async(url: str, download: bool = False) -> dict[str, Any]
     def _extract(extra_args: Optional[dict[str, Any]] = None) -> dict[str, Any]:
         opts = dict(options)
         if extra_args:
-            opts["extractor_args"] = extra_args
+            opts["extractor_args"] = merge_extractor_args(options.get("extractor_args"), extra_args)
         with yt_dlp.YoutubeDL(opts) as ydl:
             return ydl.extract_info(url, download=download)
 

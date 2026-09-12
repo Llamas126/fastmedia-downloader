@@ -48,12 +48,12 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, field_validator
 
 try:
-    from extractor import DOWNLOAD_OPTIONS_BASE, YOUTUBE_CLIENT_FALLBACKS, is_youtube_url
+    from extractor import DOWNLOAD_OPTIONS_BASE, YOUTUBE_CLIENT_FALLBACKS, is_youtube_url, merge_extractor_args
 except ModuleNotFoundError:
     _SHARED_DIR = Path(__file__).resolve().parent.parent / "shared"
     if str(_SHARED_DIR) not in sys.path:
         sys.path.insert(0, str(_SHARED_DIR))
-    from extractor import DOWNLOAD_OPTIONS_BASE, YOUTUBE_CLIENT_FALLBACKS, is_youtube_url
+    from extractor import DOWNLOAD_OPTIONS_BASE, YOUTUBE_CLIENT_FALLBACKS, is_youtube_url, merge_extractor_args
 
 logger = logging.getLogger(__name__)
 
@@ -299,7 +299,7 @@ def _download_with_fallback(options: dict[str, Any], url: str) -> dict[str, Any]
         logger.info("Reintentando descarga de YouTube con clientes alternativos: %s", url)
         for extra_args in YOUTUBE_CLIENT_FALLBACKS:
             opts = dict(options)
-            opts["extractor_args"] = extra_args
+            opts["extractor_args"] = merge_extractor_args(options.get("extractor_args"), extra_args)
             try:
                 with yt_dlp.YoutubeDL(opts) as ydl:
                     return ydl.extract_info(url, download=True)
