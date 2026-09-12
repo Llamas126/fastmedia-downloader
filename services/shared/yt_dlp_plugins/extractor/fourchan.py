@@ -8,6 +8,8 @@ import re
 from yt_dlp.extractor.common import InfoExtractor
 
 _VIDEO_EXTS = "webm|mp4|mp3|m4a|ogg|opus|mov"
+_GUESS_VIDEO_CODEC = {"mp4": "h264", "mov": "h264", "webm": "vp9", "mkv": "h264"}
+_GUESS_AUDIO_CODEC = {"mp3": "mp3", "m4a": "aac", "ogg": "vorbis", "opus": "opus"}
 
 
 class FourChanFileIE(InfoExtractor):
@@ -77,6 +79,9 @@ class FourChanIE(InfoExtractor):
                 'url': file_url,
                 'title': f'{title or video_id} {i}',
                 'ext': ext,
+                'format_id': 'direct',
+                'vcodec': _GUESS_VIDEO_CODEC.get(ext),
+                'acodec': _GUESS_AUDIO_CODEC.get(ext),
             })
 
         if len(entries) == 1:
